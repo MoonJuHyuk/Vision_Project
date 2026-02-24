@@ -14,14 +14,15 @@ class VisionInspector:
         self.cam_index_list = [1, 2, 3, 0]
         self.current_cam_idx_ptr = 0
         self.cap = self.auto_find_camera()
-        if self.cap is None:
-            print("❌ 카메라를 찾을 수 없습니다."); sys.exit()
+        if self.cap is None: sys.exit()
         self.setup_camera()
         
+        self.is_running = True # 종료 제어용 플래그
         self.is_frozen = False
         self.frozen_frame = None
         self.last_full_canvas = None
         
+        # UI 및 색상 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
@@ -30,6 +31,7 @@ class VisionInspector:
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
+        # 8행 2열 레이아웃
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'],
             ['LOAD_DXF', 'DXF_COLOR'],
@@ -43,6 +45,8 @@ class VisionInspector:
         
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
         self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
+        
+        # 초기 위치 및 배율 설정
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
         self.angle = 0.0
@@ -142,9 +146,9 @@ class VisionInspector:
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")]); root.destroy()
                         if path: self.dxf_contours, self.dxf_real_width = self.load_dxf(path); self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0; self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
-                    elif m == 'CLEAR': # [수정] 도면 scale은 유지하고 측정만 삭제
+                    elif m == 'CLEAR': # [수정] 도면 위치/배율은 남기고 측정값만 청소
                         self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None
-                    elif m == 'QUIT': sys.exit()
+                    elif m == 'QUIT': self.is_running = False # 안전 종료
                     else: self.current_mode = m; self.measure_p1 = None
                     return
         if event == cv2.EVENT_LBUTTONUP: self.pressed_button = None
@@ -182,8 +186,7 @@ class VisionInspector:
     def run(self):
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
-        while True:
-            # [중요] 윈도우 창 닫기 감지 로직
+        while self.is_running: # 플래그 기반 루프
             if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1:
                 break
             
