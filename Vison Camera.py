@@ -14,13 +14,15 @@ class VisionInspector:
         self.cam_index_list = [1, 2, 3, 0]
         self.current_cam_idx_ptr = 0
         self.cap = self.auto_find_camera()
-        if self.cap is None: sys.exit() # sys.exit()로 수정하여 에러 방지
+        if self.cap is None:
+            print("❌ 카메라를 찾을 수 없습니다."); sys.exit()
         self.setup_camera()
         
         self.is_frozen = False
         self.frozen_frame = None
         self.last_full_canvas = None
         
+        # UI 및 색상 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
@@ -50,7 +52,9 @@ class VisionInspector:
     def setup_camera(self):
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         cv2.waitKey(500); ret, frame = self.cap.read()
-        if ret: self.cam_h, self.cam_w = frame.shape[:2]; self.view_h = int(self.cam_h * (1200 / self.cam_w))
+        if ret:
+            self.cam_h, self.cam_w = frame.shape[:2]
+            self.view_h = int(self.cam_h * (1200 / self.cam_w))
 
     def auto_find_camera(self):
         for i in self.cam_index_list:
@@ -124,34 +128,33 @@ class VisionInspector:
 
     def mouse_callback(self, event, x, y, flags, param):
         self.curr_mx, self.curr_my = x, y
+        # [수정] 즉각적인 반응을 위해 LBUTTONDOWN 시점에 모든 기능 수행
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
-                # [수정] y좌표 인식 범위 오타 해결
-                if bx1 <= x <= bx2 and by1 <= y <= by2: 
-                    self.pressed_button = m; return
-        
-        if event == cv2.EVENT_LBUTTONUP and self.pressed_button:
-            m = self.pressed_button; self.pressed_button = None; bx1, by1, bx2, by2 = self.buttons[m]
-            if bx1 <= x <= bx2 and by1 <= y <= by2:
-                if m == 'FREEZE_LIVE':
-                    if not self.is_frozen:
-                        ret, frame = self.cap.read()
-                        if ret: self.frozen_frame = frame.copy(); self.is_frozen = True
-                    else: self.is_frozen = False
-                elif m == 'SWITCH_CAM': self.switch_camera()
-                elif m == 'DXF_COLOR': self.idx_dxf_color = (self.idx_dxf_color + 1) % len(self.color_palette)
-                elif m == 'MEAS_COLOR': self.idx_meas_color = (self.idx_meas_color + 1) % len(self.color_palette)
-                elif m == 'CALIB_COLOR': self.idx_calib_color = (self.idx_calib_color + 1) % len(self.color_palette)
-                elif m == 'SAVE_IMG':
-                    fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
-                    cv2.imwrite(fn, self.last_full_canvas)
-                elif m == 'LOAD_DXF': self.open_file_dialog()
-                elif m == 'CLEAR': 
-                    self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; 
-                    self.fixed_calib_line = None; self.scale = 1.0; self.angle = 0.0
-                elif m == 'QUIT': sys.exit() # NameError 방지
-                else: self.current_mode = m; self.measure_p1 = None
-            return
+                if bx1 <= x <= bx2 and by1 <= y <= by2:
+                    print(f"🔘 버튼 클릭됨: {m}") # 디버깅용
+                    self.pressed_button = m
+                    if m == 'FREEZE_LIVE':
+                        if not self.is_frozen:
+                            ret, frame = self.cap.read()
+                            if ret: self.frozen_frame = frame.copy(); self.is_frozen = True
+                        else: self.is_frozen = False
+                    elif m == 'SWITCH_CAM': self.switch_camera()
+                    elif m == 'DXF_COLOR': self.idx_dxf_color = (self.idx_dxf_color + 1) % len(self.color_palette)
+                    elif m == 'MEAS_COLOR': self.idx_meas_color = (self.idx_meas_color + 1) % len(self.color_palette)
+                    elif m == 'CALIB_COLOR': self.idx_calib_color = (self.idx_calib_color + 1) % len(self.color_palette)
+                    elif m == 'SAVE_IMG':
+                        fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
+                        cv2.imwrite(fn, self.last_full_canvas); print(f"💾 저장완료: {fn}")
+                    elif m == 'LOAD_DXF': self.open_file_dialog()
+                    elif m == 'CLEAR': 
+                        self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; 
+                        self.fixed_calib_line = None; self.scale = 1.0; self.angle = 0.0
+                    elif m == 'QUIT': sys.exit()
+                    else: self.current_mode = m; self.measure_p1 = None
+                    return
+
+        if event == cv2.EVENT_LBUTTONUP: self.pressed_button = None
 
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
         if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
@@ -192,7 +195,8 @@ class VisionInspector:
             self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
 
     def run(self):
-        cv2.namedWindow('Vision Inspector', cv2.WINDOW_NORMAL)
+        # [중요] 좌표 일치를 위해 WINDOW_AUTOSIZE로 변경
+        cv2.namedWindow('Vision Inspector', cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
         while True:
             if self.is_frozen: frame = self.frozen_frame.copy()
