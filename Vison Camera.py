@@ -24,7 +24,6 @@ class VisionInspector:
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
-        
         self.dxf_color_list = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.current_color_idx = 0
         
@@ -36,9 +35,8 @@ class VisionInspector:
         self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
         self.angle = 0.0; self.measurements = []
         
-        # 캘리브레이션용 변수
-        self.calib_p1 = None
-        self.calib_p2 = None # 실시간 드래그 지점
+        # 캘리브레이션 시각화 변수
+        self.calib_p1 = None; self.calib_p2 = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
 
     def setup_camera(self):
@@ -126,11 +124,11 @@ class VisionInspector:
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
         if event == cv2.EVENT_LBUTTONDOWN:
             self.is_dragging = True; self.lmx, self.lmy = x, y
-            if self.current_mode == 'CALIB': self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
+            if self.current_mode == 'CALIB': 
+                # 누르는 즉시 시작점과 끝점을 같은 위치로 설정하여 점이 보이게 함
+                self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
         elif event == cv2.EVENT_MOUSEMOVE and self.is_dragging:
-            # 실시간 드래그 지점 업데이트
             if self.current_mode == 'CALIB': self.calib_p2 = (rx, ry)
-            
             dx, dy = (x - self.lmx) * w_ratio, (y - self.lmy) * w_ratio
             if self.current_mode == 'PAN': self.offset_x += dx; self.offset_y += dy
             elif self.current_mode == 'ZOOM': self.scale *= (1 - dy * 0.005)
@@ -138,14 +136,13 @@ class VisionInspector:
             self.lmx, self.lmy = x, y
         elif event == cv2.EVENT_LBUTTONUP:
             if self.is_dragging and self.current_mode == 'CALIB' and self.calib_p1:
-                # 최종 지점 확정
                 dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
                 if dist_px > 10:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     val = simpledialog.askfloat("Calibration", "드래그한 선의 실제 길이(mm) 입력:", parent=root)
                     if val: self.scale = dist_px / val
                     root.destroy()
-                self.calib_p1 = None; self.calib_p2 = None
+                self.calib_p1 = None; self.calib_p2 = None # 입력 완료 후 초기화
             self.is_dragging = False
 
     def open_file_dialog(self):
@@ -167,25 +164,24 @@ class VisionInspector:
             
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
             draw_color = self.dxf_color_list[self.current_color_idx]
-            
-            # 도면 그리기
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
                 cv2.polylines(canvas, [pts_draw], True, draw_color, 1)
             
-            # [추가] 캘리브레이션 드래그 선 실시간 시각화
-            if self.current_mode == 'CALIB' and self.calib_p1 and self.calib_p2:
-                p1 = (int(self.calib_p1[0]), int(self.calib_p1[1]))
-                p2 = (int(self.calib_p2[0]), int(self.calib_p2[1]))
-                cv2.line(canvas, p1, p2, (0, 0, 255), 2) # 빨간색 가이드 선
-                cv2.circle(canvas, p1, 5, (0, 0, 255), -1)
-                cv2.circle(canvas, p2, 5, (0, 0, 255), -1)
-            
+            # [수정] 캘리브레이션 실시간 안내 및 선 그리기
+            if self.current_mode == 'CALIB':
+                cv2.putText(canvas, "CALIB MODE: CLICK & DRAG TO DRAW LINE", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                if self.calib_p1 and self.calib_p2:
+                    p1 = (int(self.calib_p1[0]), int(self.calib_p1[1]))
+                    p2 = (int(self.calib_p2[0]), int(self.calib_p2[1]))
+                    cv2.line(canvas, p1, p2, (0, 0, 255), 2)
+                    cv2.circle(canvas, p1, 6, (0, 0, 255), -1) # 시작점 원 표시
+                    cv2.circle(canvas, p2, 6, (0, 0, 255), -1)
+
             self.last_full_canvas = canvas.copy()
             res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8)
             display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
-            
             cv2.imshow('Vision Inspector', display_img)
             if cv2.waitKey(1) == ord('q'): break
         self.cap.release(); cv2.destroyAllWindows()
