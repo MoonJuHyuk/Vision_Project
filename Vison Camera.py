@@ -12,8 +12,10 @@ class VisionInspector:
     def __init__(self, dxf_path=""):
         self.dxf_path = dxf_path
         self.cam_index_list = [1, 2, 3, 0]
+        self.current_cam_idx_ptr = 0
         self.cap = self.auto_find_camera()
-        if self.cap is None: sys.exit()
+        if self.cap is None:
+            print("❌ 카메라를 찾을 수 없습니다."); sys.exit()
         self.setup_camera()
         
         self.is_frozen = False
@@ -29,16 +31,16 @@ class VisionInspector:
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
-        # [수정] 버튼 2열 배치 및 측정 모드 세분화
+        # [재배치] 8행 2열 레이아웃 및 측정 모드 세분화
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'],
             ['LOAD_DXF', 'DXF_COLOR'],
             ['PAN', 'ZOOM'],
             ['ROTATE', 'CLEAR'],
-            ['MEAS_P2P', 'MEAS_HV'],   # 측정 종류 두 가지로 분리
-            ['MEAS_COLOR', 'CALIB'],
-            ['CALIB_COLOR', 'SAVE_IMG'],
-            ['QUIT', '']               # QUIT 버튼 배치
+            ['MEAS_P2P', 'MEAS_HV'],
+            ['MEAS_COLOR', 'MEAS_UNDO'], # 측정 취소(UNDO) 추가
+            ['CALIB', 'CALIB_COLOR'],
+            ['SAVE_IMG', 'QUIT']
         ]
         
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
@@ -47,7 +49,7 @@ class VisionInspector:
         self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
         self.angle = 0.0
         
-        self.measurements = [] # [(p1, p2, val, type)] 저장
+        self.measurements = [] # [(p1, p2, val, type)]
         self.measure_p1 = None
         self.calib_p1 = None; self.calib_p2 = None; self.fixed_calib_line = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
@@ -77,11 +79,10 @@ class VisionInspector:
         return [c - center for c in contours], dxf_w
 
     def init_buttons(self):
-        btn_h = 30; margin_x = 10; margin_y = 5; start_y = 45
+        btn_h = 28; margin_x = 10; margin_y = 5; start_y = 45
         col_w = (self.ui_w - 30 - margin_x) // 2
         for r, row in enumerate(self.modes_grid):
             for c, mode in enumerate(row):
-                if not mode: continue
                 x1 = self.view_w + 15 + (c * (col_w + margin_x))
                 y1 = start_y + r * (btn_h + margin_y)
                 self.buttons[mode] = (x1, y1, x1 + col_w, y1 + btn_h)
@@ -102,9 +103,8 @@ class VisionInspector:
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
             cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
-            display_img = self.draw_text_pretty(display_img, mode.replace('_', ' '), (x1 + 5, y1 + 7), size=10, color=t_clr, bold=active)
+            display_img = self.draw_text_pretty(display_img, mode.replace('_', ' '), (x1 + 5, y1 + 5), size=10, color=t_clr, bold=active)
         
-        # 돋보기 창
         mag_size = 200; mag_margin = 25
         mag_y1, mag_y2 = self.view_h - mag_size - mag_margin, self.view_h - mag_margin
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
@@ -138,6 +138,9 @@ class VisionInspector:
                     elif m == 'DXF_COLOR': self.idx_dxf_color = (self.idx_dxf_color + 1) % len(self.color_palette)
                     elif m == 'MEAS_COLOR': self.idx_meas_color = (self.idx_meas_color + 1) % len(self.color_palette)
                     elif m == 'CALIB_COLOR': self.idx_calib_color = (self.idx_calib_color + 1) % len(self.color_palette)
+                    elif m == 'MEAS_UNDO': # [신규] 측정 취소 기능
+                        if self.measure_p1: self.measure_p1 = None # 찍던 중이면 점 취소
+                        elif self.measurements: self.measurements.pop() # 완료된 거면 마지막 수치 삭제
                     elif m == 'SAVE_IMG':
                         fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
                         cv2.imwrite(fn, self.last_full_canvas)
@@ -155,12 +158,12 @@ class VisionInspector:
         if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
             self.is_dragging = True; self.lmx, self.lmy = x, y
             if self.current_mode == 'CALIB': self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
-            elif 'MEAS' in self.current_mode: # 측정 모드 통합 처리
+            elif 'MEAS' in self.current_mode:
                 if self.measure_p1 is None: self.measure_p1 = (rx, ry)
                 else:
                     p1, p2 = np.array(self.measure_p1), np.array([rx, ry])
                     dist_px = np.linalg.norm(p1 - p2)
-                    if self.current_mode == 'MEAS_HV': # 수평/수직 거리 계산
+                    if self.current_mode == 'MEAS_HV': # 수평/수직 보정 거리
                         dist_px = max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
                     self.measurements.append((self.measure_p1, (rx, ry), dist_px / self.scale, self.current_mode))
                     self.measure_p1 = None
@@ -200,7 +203,7 @@ class VisionInspector:
                 cv2.line(canvas, p1i, p2i, calib_clr, 2); cv2.putText(canvas, f"REF: {val:.1f}mm", (p1i[0], p1i[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
             for m1, m2, val, m_type in self.measurements:
                 p1, p2 = (int(m1[0]), int(m1[1])), (int(m2[0]), int(m2[1]))
-                if m_type == 'MEAS_HV': # 수평/수직 가이드 그리기
+                if m_type == 'MEAS_HV': # 수평/수직 가이드 보정
                     if abs(p1[0]-p2[0]) > abs(p1[1]-p2[1]): cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 2); p2 = (p2[0], p1[1])
                     else: cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 2); p2 = (p1[0], p2[1])
                 else: cv2.line(canvas, p1, p2, meas_clr, 2)
