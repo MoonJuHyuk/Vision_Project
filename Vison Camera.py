@@ -33,10 +33,15 @@ class VisionInspector:
         self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
-        self.angle = 0.0; self.measurements = []
+        self.angle = 0.0
         
-        # 캘리브레이션 시각화 변수
+        self.measurements = []
+        self.measure_p1 = None
+        
+        # [수정] 캘리브레이션 기준선 저장 변수
         self.calib_p1 = None; self.calib_p2 = None
+        self.fixed_calib_line = None # (p1, p2, mm_val) 저장용
+        
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
 
     def setup_camera(self):
@@ -71,7 +76,7 @@ class VisionInspector:
         return [c - center for c in contours], dxf_w
 
     def init_buttons(self):
-        btn_h = 36; margin = 6; start_y = 60
+        btn_h = 32; margin = 5; start_y = 55
         for i, mode in enumerate(self.modes):
             y1 = start_y + i * (btn_h + margin)
             self.buttons[mode] = (self.view_w + 15, y1, self.total_w - 15, y1 + btn_h)
@@ -85,19 +90,37 @@ class VisionInspector:
     def draw_ui(self, display_img):
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, self.view_h), self.clr_bg, -1)
         cv2.line(display_img, (self.view_w, 0), (self.view_w, self.view_h), (222, 226, 230), 1)
-        status_text = "PHOTO MODE" if self.is_frozen else "LIVE MODE"
-        display_img = self.draw_text_pretty(display_img, status_text, (self.view_w + 20, 20), size=18, bold=True, color=self.clr_primary)
+        display_img = self.draw_text_pretty(display_img, "VISION CONTROL", (self.view_w + 20, 15), size=18, bold=True, color=self.clr_primary)
+        
         for mode, (x1, y1, x2, y2) in self.buttons.items():
             active = (mode == self.current_mode); pressed = (mode == self.pressed_button)
             b_clr = self.clr_pressed if pressed else (self.clr_primary if active else (255, 255, 255))
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
-            if not pressed: cv2.rectangle(display_img, (x1+1, y1+1), (x2+1, y2+1), (200, 200, 200), -1)
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
-            cv2.rectangle(display_img, (x1, y1), (x2, y2), (180, 180, 180), 1)
-            display_img = self.draw_text_pretty(display_img, mode, (x1 + 10, y1 + 8), color=t_clr, bold=active)
+            cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
+            display_img = self.draw_text_pretty(display_img, mode, (x1 + 10, y1 + 7), size=13, color=t_clr, bold=active)
+        
+        mag_size = 200; mag_margin = 40
+        mag_y1, mag_y2 = self.view_h - mag_size - mag_margin, self.view_h - mag_margin
+        mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
+        cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
+        
+        if self.curr_mx < self.view_w:
+            w_ratio = self.cam_w / self.view_w
+            rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
+            roi_s = 30
+            y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s)
+            x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
+            if y2 > y1 and x2 > x1:
+                roi = self.last_full_canvas[y1:y2, x1:x2]
+                roi_res = cv2.resize(roi, (mag_size, mag_size), interpolation=cv2.INTER_NEAREST)
+                display_img[mag_y1:mag_y2, mag_x1:mag_x2] = roi_res
+                cv2.line(display_img, (mag_x1 + mag_size//2, mag_y1), (mag_x1 + mag_size//2, mag_y2), (0, 255, 0), 1)
+                cv2.line(display_img, (mag_x1, mag_y1 + mag_size//2), (mag_x2, mag_y1 + mag_size//2), (0, 255, 0), 1)
         return display_img
 
     def mouse_callback(self, event, x, y, flags, param):
+        self.curr_mx, self.curr_my = x, y
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
                 if bx1 <= x <= bx2 and by1 <= y <= by2: self.pressed_button = m; return
@@ -116,17 +139,25 @@ class VisionInspector:
                     fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
                     cv2.imwrite(fn, self.last_full_canvas)
                 elif m == 'LOAD_DXF': self.open_file_dialog()
-                elif m == 'CLEAR': self.measurements = []; self.calib_p1 = None; self.scale = 1.0; self.angle = 0.0
+                elif m == 'CLEAR': # [수정] 캘리브레이션 기준선도 함께 삭제
+                    self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; 
+                    self.fixed_calib_line = None; self.scale = 1.0; self.angle = 0.0
                 elif m == 'QUIT': self.current_mode = 'QUIT'
-                else: self.current_mode = m
+                else: self.current_mode = m; self.measure_p1 = None
             return
 
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
-        if event == cv2.EVENT_LBUTTONDOWN:
+        if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
             self.is_dragging = True; self.lmx, self.lmy = x, y
-            if self.current_mode == 'CALIB': 
-                # 누르는 즉시 시작점과 끝점을 같은 위치로 설정하여 점이 보이게 함
-                self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
+            if self.current_mode == 'CALIB': self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
+            elif self.current_mode == 'MEASURE':
+                if self.measure_p1 is None: self.measure_p1 = (rx, ry)
+                else:
+                    dist_px = np.linalg.norm(np.array(self.measure_p1) - np.array([rx, ry]))
+                    dist_mm = dist_px / self.scale
+                    self.measurements.append((self.measure_p1, (rx, ry), dist_mm))
+                    self.measure_p1 = None
+        
         elif event == cv2.EVENT_MOUSEMOVE and self.is_dragging:
             if self.current_mode == 'CALIB': self.calib_p2 = (rx, ry)
             dx, dy = (x - self.lmx) * w_ratio, (y - self.lmy) * w_ratio
@@ -139,19 +170,14 @@ class VisionInspector:
                 dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
                 if dist_px > 10:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                    val = simpledialog.askfloat("Calibration", "드래그한 선의 실제 길이(mm) 입력:", parent=root)
-                    if val: self.scale = dist_px / val
+                    val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root)
+                    if val: 
+                        self.scale = dist_px / val
+                        # [추가] 기준선 고정 데이터 저장
+                        self.fixed_calib_line = (self.calib_p1, (rx, ry), val)
                     root.destroy()
-                self.calib_p1 = None; self.calib_p2 = None # 입력 완료 후 초기화
+                self.calib_p1 = None; self.calib_p2 = None
             self.is_dragging = False
-
-    def open_file_dialog(self):
-        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-        path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")]); root.destroy()
-        if path:
-            self.dxf_contours, self.dxf_real_width = self.load_dxf(path)
-            self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
-            self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
 
     def run(self):
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_NORMAL)
@@ -168,16 +194,26 @@ class VisionInspector:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
                 cv2.polylines(canvas, [pts_draw], True, draw_color, 1)
             
-            # [수정] 캘리브레이션 실시간 안내 및 선 그리기
-            if self.current_mode == 'CALIB':
-                cv2.putText(canvas, "CALIB MODE: CLICK & DRAG TO DRAW LINE", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                if self.calib_p1 and self.calib_p2:
-                    p1 = (int(self.calib_p1[0]), int(self.calib_p1[1]))
-                    p2 = (int(self.calib_p2[0]), int(self.calib_p2[1]))
-                    cv2.line(canvas, p1, p2, (0, 0, 255), 2)
-                    cv2.circle(canvas, p1, 6, (0, 0, 255), -1) # 시작점 원 표시
-                    cv2.circle(canvas, p2, 6, (0, 0, 255), -1)
+            # [추가] 고정된 캘리브레이션 기준선 그리기
+            if self.fixed_calib_line:
+                p1, p2, val = self.fixed_calib_line
+                p1_i, p2_i = (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1]))
+                cv2.line(canvas, p1_i, p2_i, (0, 0, 255), 2)
+                cv2.circle(canvas, p1_i, 5, (0, 0, 255), -1)
+                cv2.circle(canvas, p2_i, 5, (0, 0, 255), -1)
+                cv2.putText(canvas, f"CALIB REF: {val:.1f}mm", (p1_i[0], p1_i[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
+            for m in self.measurements:
+                p1, p2 = (int(m[0][0]), int(m[0][1])), (int(m[1][0]), int(m[1][1]))
+                cv2.line(canvas, p1, p2, (255, 0, 255), 2)
+                cv2.putText(canvas, f"{m[2]:.3f}mm", (p2[0]+10, p2[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            if self.current_mode == 'MEASURE' and self.measure_p1:
+                cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, (0, 255, 255), 2)
+
+            if self.current_mode == 'CALIB' and self.calib_p1 and self.calib_p2:
+                cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), (0, 0, 255), 2)
+            
             self.last_full_canvas = canvas.copy()
             res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8)
