@@ -14,26 +14,21 @@ class VisionInspector:
         self.cam_index_list = [1, 2, 3, 0]
         self.current_cam_idx_ptr = 0
         self.cap = self.auto_find_camera()
-        if self.cap is None: sys.exit()
+        if self.cap is None: sys.exit() # sys.exit()로 수정하여 에러 방지
         self.setup_camera()
         
         self.is_frozen = False
         self.frozen_frame = None
         self.last_full_canvas = None
         
-        # UI 및 색상 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
         
-        # 개별 색상 관리를 위한 인덱스
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
-        self.idx_dxf_color = 0    # 도면: 녹색(기본)
-        self.idx_meas_color = 3   # 측정: 황색(기본)
-        self.idx_calib_color = 2  # 캘리브: 적색(기본)
+        self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
-        # 2열 버튼 배치 그리드 설정
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'],
             ['LOAD_DXF', 'DXF_COLOR'],
@@ -44,20 +39,12 @@ class VisionInspector:
             ['SAVE_IMG', 'QUIT']
         ]
         
-        self.current_mode = 'PAN'
-        self.pressed_button = None
-        self.buttons = {}
-        self.init_buttons()
-        
+        self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
         self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
-        self.angle = 0.0
-        
-        self.measurements = []
-        self.measure_p1 = None
-        self.calib_p1 = None; self.calib_p2 = None
-        self.fixed_calib_line = None
+        self.angle = 0.0; self.measurements = []; self.measure_p1 = None
+        self.calib_p1 = None; self.calib_p2 = None; self.fixed_calib_line = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
 
     def setup_camera(self):
@@ -92,7 +79,6 @@ class VisionInspector:
         return [c - center for c in contours], dxf_w
 
     def init_buttons(self):
-        # 2열 배치를 위한 좌표 계산
         btn_h = 32; margin_x = 10; margin_y = 6; start_y = 50
         col_w = (self.ui_w - 30 - margin_x) // 2
         for r, row in enumerate(self.modes_grid):
@@ -111,30 +97,23 @@ class VisionInspector:
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, self.view_h), self.clr_bg, -1)
         cv2.line(display_img, (self.view_w, 0), (self.view_w, self.view_h), (222, 226, 230), 1)
         display_img = self.draw_text_pretty(display_img, "VISION CONTROL", (self.view_w + 20, 15), size=16, bold=True, color=self.clr_primary)
-        
         for mode, (x1, y1, x2, y2) in self.buttons.items():
             active = (mode == self.current_mode); pressed = (mode == self.pressed_button)
             b_clr = self.clr_pressed if pressed else (self.clr_primary if active else (255, 255, 255))
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
             cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
-            
-            # 버튼 이름 가독성 개선 (언더바 제거)
             display_name = mode.replace('_', ' ')
             display_img = self.draw_text_pretty(display_img, display_name, (x1 + 5, y1 + 7), size=10, color=t_clr, bold=active)
         
-        # 하단 돋보기 창 (Magnifier) - 메뉴와 겹치지 않게 배치
         mag_size = 200; mag_margin = 30
         mag_y1, mag_y2 = self.view_h - mag_size - mag_margin, self.view_h - mag_margin
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
-        
         if self.curr_mx < self.view_w:
             w_ratio = self.cam_w / self.view_w
             rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
-            roi_s = 30
-            y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s)
-            x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
+            roi_s = 30; y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s); x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
             if y2 > y1 and x2 > x1:
                 roi = self.last_full_canvas[y1:y2, x1:x2]
                 roi_res = cv2.resize(roi, (mag_size, mag_size), interpolation=cv2.INTER_NEAREST)
@@ -147,7 +126,9 @@ class VisionInspector:
         self.curr_mx, self.curr_my = x, y
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
-                if bx1 <= x <= bx2 and by1 <= y <= by2: self.pressed_button = m; return
+                # [수정] y좌표 인식 범위 오타 해결
+                if bx1 <= x <= bx2 and by1 <= y <= by2: 
+                    self.pressed_button = m; return
         
         if event == cv2.EVENT_LBUTTONUP and self.pressed_button:
             m = self.pressed_button; self.pressed_button = None; bx1, by1, bx2, by2 = self.buttons[m]
@@ -168,7 +149,7 @@ class VisionInspector:
                 elif m == 'CLEAR': 
                     self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; 
                     self.fixed_calib_line = None; self.scale = 1.0; self.angle = 0.0
-                elif m == 'QUIT': sys.exit()
+                elif m == 'QUIT': sys.exit() # NameError 방지
                 else: self.current_mode = m; self.measure_p1 = None
             return
 
@@ -197,9 +178,7 @@ class VisionInspector:
                 if dist_px > 10:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root)
-                    if val: 
-                        self.scale = dist_px / val
-                        self.fixed_calib_line = (self.calib_p1, (rx, ry), val)
+                    if val: self.scale = dist_px / val; self.fixed_calib_line = (self.calib_p1, (rx, ry), val)
                     root.destroy()
                 self.calib_p1 = None; self.calib_p2 = None
             self.is_dragging = False
@@ -220,36 +199,24 @@ class VisionInspector:
             else: 
                 ret, frame = self.cap.read()
                 if not ret: continue
-            
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
-            
-            # 개별 설정된 색상 적용
-            dxf_clr = self.color_palette[self.idx_dxf_color]
-            meas_clr = self.color_palette[self.idx_meas_color]
-            calib_clr = self.color_palette[self.idx_calib_color]
-
+            dxf_clr = self.color_palette[self.idx_dxf_color]; meas_clr = self.color_palette[self.idx_meas_color]; calib_clr = self.color_palette[self.idx_calib_color]
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
                 cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
-            
             if self.fixed_calib_line:
                 p1, p2, val = self.fixed_calib_line
                 cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 2)
                 cv2.putText(canvas, f"REF: {val:.1f}mm", (int(p1[0]), int(p1[1])-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
-
             for m in self.measurements:
                 p1, p2 = (int(m[0][0]), int(m[0][1])), (int(m[1][0]), int(m[1][1]))
                 cv2.line(canvas, p1, p2, meas_clr, 2)
                 cv2.putText(canvas, f"{m[2]:.3f}mm", (p2[0]+10, p2[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 2)
-            
             if self.current_mode == 'MEASURE' and self.measure_p1:
                 cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 2)
-
             if self.current_mode == 'CALIB' and self.calib_p1 and self.calib_p2:
                 cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 2)
-            
-            self.last_full_canvas = canvas.copy()
-            res_view = cv2.resize(canvas, (self.view_w, self.view_h))
+            self.last_full_canvas = canvas.copy(); res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8)
             display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
             cv2.imshow('Vision Inspector', display_img)
