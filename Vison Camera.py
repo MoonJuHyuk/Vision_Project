@@ -16,22 +16,27 @@ class VisionInspector:
         if self.cap is None: exit()
         self.setup_camera()
         
-        # 캔버스 및 상태 관리
-        self.is_frozen = False  # 사진 모드 여부
-        self.frozen_frame = None
-        self.last_full_canvas = None # 저장을 위한 최종 캔버스
+        # 상태 관리 변수
+        self.is_frozen = False      # 사진 모드(정지) 여부
+        self.frozen_frame = None    # 캡처된 정지 화면
+        self.last_full_canvas = None # 저장용 최종 이미지
         
-        # UI 및 색상
+        # UI 및 색상 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
+        
+        # 도면 색상 (녹색, 적색, 청색, 황색, 백색)
         self.dxf_color_list = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.current_color_idx = 0
         
-        # [수정] FREEZE_LIVE 모드 추가
+        # [중요] 버튼 목록에 FREEZE_LIVE 추가
         self.modes = ['FREEZE_LIVE', 'SWITCH_CAM', 'COLOR_TOGGLE', 'LOAD_DXF', 'PAN', 'ZOOM', 'ROTATE', 'MEASURE', 'CALIB', 'SAVE_IMG', 'CLEAR', 'QUIT']
-        self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
+        self.current_mode = 'PAN'
+        self.pressed_button = None # 클릭 시 꾹 눌리는 효과용
+        self.buttons = {}
+        self.init_buttons()
         
         self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
@@ -49,7 +54,7 @@ class VisionInspector:
             cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
             if cap.isOpened():
                 ret, frame = cap.read()
-                if ret and frame is not None: self.current_cam_idx_ptr = self.cam_index_list.index(i); return cap
+                if ret and frame is not None: return cap
             cap.release()
         return None
 
@@ -83,42 +88,52 @@ class VisionInspector:
         draw.text(pos, text, font=font, fill=(color[2], color[1], color[0])); return np.array(img_pil)
 
     def draw_ui(self, display_img):
+        # 사이드바 배경 및 타이틀
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, self.view_h), self.clr_bg, -1)
         cv2.line(display_img, (self.view_w, 0), (self.view_w, self.view_h), (222, 226, 230), 1)
-        title = "VISION - " + ("PAUSED" if self.is_frozen else "LIVE")
-        display_img = self.draw_text_pretty(display_img, title, (self.view_w + 20, 20), size=18, bold=True, color=self.clr_primary)
+        status_text = "PHOTO MODE" if self.is_frozen else "LIVE MODE"
+        display_img = self.draw_text_pretty(display_img, status_text, (self.view_w + 20, 20), size=18, bold=True, color=self.clr_primary)
+        
         for mode, (x1, y1, x2, y2) in self.buttons.items():
             active = (mode == self.current_mode); pressed = (mode == self.pressed_button)
+            # 꾹 눌리는 효과 색상 적용
             b_clr = self.clr_pressed if pressed else (self.clr_primary if active else (255, 255, 255))
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
+            
             if not pressed: cv2.rectangle(display_img, (x1+1, y1+1), (x2+1, y2+1), (200, 200, 200), -1)
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
             cv2.rectangle(display_img, (x1, y1), (x2, y2), (180, 180, 180), 1)
-            display_img = self.draw_text_pretty(display_img, mode, (x1 + 10, y1 + 8), color=t_clr, bold=active)
+            
+            # 눌렸을 때 텍스트를 약간 아래로 이동시켜 입체감 부여
+            ty = y1 + 10 if pressed else y1 + 8
+            display_img = self.draw_text_pretty(display_img, mode, (x1 + 10, ty), color=t_clr, bold=active)
         return display_img
 
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
                 if bx1 <= x <= bx2 and by1 <= y <= by2: self.pressed_button = m; return
+                
         if event == cv2.EVENT_LBUTTONUP and self.pressed_button:
             m = self.pressed_button; self.pressed_button = None; bx1, by1, bx2, by2 = self.buttons[m]
             if bx1 <= x <= bx2 and by1 <= y <= by2:
-                if m == 'FREEZE_LIVE': # [추가] 사진 모드 토글
+                if m == 'FREEZE_LIVE': # [신규] 화면 정지 및 해제
                     if not self.is_frozen:
                         ret, frame = self.cap.read()
                         if ret: self.frozen_frame = frame.copy(); self.is_frozen = True
                     else: self.is_frozen = False
                 elif m == 'SWITCH_CAM': self.switch_camera()
                 elif m == 'COLOR_TOGGLE': self.current_color_idx = (self.current_color_idx + 1) % len(self.dxf_color_list)
-                elif m == 'SAVE_IMG': # [추가] 도면 포함 저장
+                elif m == 'SAVE_IMG': # [신규] 도면 포함 저장
                     fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
-                    cv2.imwrite(fn, self.last_full_canvas); print(f"Saved: {fn}")
+                    cv2.imwrite(fn, self.last_full_canvas)
                 elif m == 'LOAD_DXF': self.open_file_dialog()
                 elif m == 'CLEAR': self.measurements = []; self.calib_p1 = None; self.scale = 1.0; self.angle = 0.0
                 elif m == 'QUIT': self.current_mode = 'QUIT'
                 else: self.current_mode = m
             return
+            
+        # 메인 화면 조작 (PAN, ZOOM, ROTATE)
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
         if event == cv2.EVENT_LBUTTONDOWN:
             self.is_dragging = True; self.lmx, self.lmy = x, y
@@ -143,6 +158,7 @@ class VisionInspector:
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_NORMAL)
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
         while self.current_mode != 'QUIT':
+            # 정지 모드일 때는 캡처된 화면 사용, 라이브일 때는 실시간 수신
             if self.is_frozen: frame = self.frozen_frame.copy()
             else: 
                 ret, frame = self.cap.read()
@@ -150,18 +166,17 @@ class VisionInspector:
             
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
             draw_color = self.dxf_color_list[self.current_color_idx]
+            
+            # 도면 그리기 (정지 화면 위에도 그려짐)
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
                 cv2.polylines(canvas, [pts_draw], True, draw_color, 1)
             
-            # 측정 수치 오버레이 (저장 시 포함되도록 함)
-            if self.is_frozen:
-                cv2.putText(canvas, "FROZEN (PHOTO MODE)", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            
-            self.last_full_canvas = canvas.copy() # 최종 저장용 원본 크기 캔버스
+            self.last_full_canvas = canvas.copy() # 저장 시 도면이 포함되도록 원본 저장
             res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8)
             display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
+            
             cv2.imshow('Vision Inspector', display_img)
             if cv2.waitKey(1) == ord('q'): break
         self.cap.release(); cv2.destroyAllWindows()
