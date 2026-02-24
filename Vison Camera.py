@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import ezdxf
 import os
+import sys
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, simpledialog
@@ -13,7 +14,7 @@ class VisionInspector:
         self.cam_index_list = [1, 2, 3, 0]
         self.current_cam_idx_ptr = 0
         self.cap = self.auto_find_camera()
-        if self.cap is None: exit()
+        if self.cap is None: sys.exit()
         self.setup_camera()
         
         self.is_frozen = False
@@ -26,13 +27,13 @@ class VisionInspector:
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
         
-        # 색상 리스트 및 각 항목별 인덱스
+        # 개별 색상 관리를 위한 인덱스
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
-        self.idx_dxf_color = 0    # 도면 색상
-        self.idx_meas_color = 3   # 측정선 색상 (기본 황색)
-        self.idx_calib_color = 2  # 캘리브선 색상 (기본 적색)
+        self.idx_dxf_color = 0    # 도면: 녹색(기본)
+        self.idx_meas_color = 3   # 측정: 황색(기본)
+        self.idx_calib_color = 2  # 캘리브: 적색(기본)
         
-        # 버튼 2열 배치를 위한 그리드 설정
+        # 2열 버튼 배치 그리드 설정
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'],
             ['LOAD_DXF', 'DXF_COLOR'],
@@ -91,16 +92,14 @@ class VisionInspector:
         return [c - center for c in contours], dxf_w
 
     def init_buttons(self):
-        # 2열 버튼 좌표 계산
-        btn_h = 32; margin = 6; start_y = 50
-        col_w = (self.ui_w - 30) // 2
+        # 2열 배치를 위한 좌표 계산
+        btn_h = 32; margin_x = 10; margin_y = 6; start_y = 50
+        col_w = (self.ui_w - 30 - margin_x) // 2
         for r, row in enumerate(self.modes_grid):
             for c, mode in enumerate(row):
-                x1 = self.view_w + 10 + (c * (col_w + 10))
-                y1 = start_y + r * (btn_h + margin)
-                x2 = x1 + col_w
-                y2 = y1 + btn_h
-                self.buttons[mode] = (x1, y1, x2, y2)
+                x1 = self.view_w + 15 + (c * (col_w + margin_x))
+                y1 = start_y + r * (btn_h + margin_y)
+                self.buttons[mode] = (x1, y1, x1 + col_w, y1 + btn_h)
 
     def draw_text_pretty(self, img, text, pos, size=13, color=(33, 37, 41), bold=False):
         img_pil = Image.fromarray(img); draw = ImageDraw.Draw(img_pil)
@@ -119,15 +118,17 @@ class VisionInspector:
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
             cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
-            # 버튼 이름 가독성을 위해 언더바 제거하여 표시
+            
+            # 버튼 이름 가독성 개선 (언더바 제거)
             display_name = mode.replace('_', ' ')
-            display_img = self.draw_text_pretty(display_img, display_name, (x1 + 6, y1 + 7), size=11, color=t_clr, bold=active)
+            display_img = self.draw_text_pretty(display_img, display_name, (x1 + 5, y1 + 7), size=10, color=t_clr, bold=active)
         
-        # 하단 돋보기 창 (겹치지 않도록 위치 유지)
+        # 하단 돋보기 창 (Magnifier) - 메뉴와 겹치지 않게 배치
         mag_size = 200; mag_margin = 30
         mag_y1, mag_y2 = self.view_h - mag_size - mag_margin, self.view_h - mag_margin
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
+        
         if self.curr_mx < self.view_w:
             w_ratio = self.cam_w / self.view_w
             rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
@@ -146,7 +147,7 @@ class VisionInspector:
         self.curr_mx, self.curr_my = x, y
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
-                if bx1 <= x <= bx2 and by1 <= by2: self.pressed_button = m; return
+                if bx1 <= x <= bx2 and by1 <= y <= by2: self.pressed_button = m; return
         
         if event == cv2.EVENT_LBUTTONUP and self.pressed_button:
             m = self.pressed_button; self.pressed_button = None; bx1, by1, bx2, by2 = self.buttons[m]
@@ -167,7 +168,7 @@ class VisionInspector:
                 elif m == 'CLEAR': 
                     self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; 
                     self.fixed_calib_line = None; self.scale = 1.0; self.angle = 0.0
-                elif m == 'QUIT': self.current_mode = 'QUIT'
+                elif m == 'QUIT': sys.exit()
                 else: self.current_mode = m; self.measure_p1 = None
             return
 
@@ -214,7 +215,7 @@ class VisionInspector:
     def run(self):
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_NORMAL)
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
-        while self.current_mode != 'QUIT':
+        while True:
             if self.is_frozen: frame = self.frozen_frame.copy()
             else: 
                 ret, frame = self.cap.read()
@@ -222,7 +223,7 @@ class VisionInspector:
             
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
             
-            # 개별 색상 적용
+            # 개별 설정된 색상 적용
             dxf_clr = self.color_palette[self.idx_dxf_color]
             meas_clr = self.color_palette[self.idx_meas_color]
             calib_clr = self.color_palette[self.idx_calib_color]
@@ -233,9 +234,8 @@ class VisionInspector:
             
             if self.fixed_calib_line:
                 p1, p2, val = self.fixed_calib_line
-                p1_i, p2_i = (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1]))
-                cv2.line(canvas, p1_i, p2_i, calib_clr, 2)
-                cv2.putText(canvas, f"REF: {val:.1f}mm", (p1_i[0], p1_i[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
+                cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 2)
+                cv2.putText(canvas, f"REF: {val:.1f}mm", (int(p1[0]), int(p1[1])-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
 
             for m in self.measurements:
                 p1, p2 = (int(m[0][0]), int(m[0][1])), (int(m[1][0]), int(m[1][1]))
