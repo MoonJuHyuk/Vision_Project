@@ -22,7 +22,6 @@ class VisionInspector:
         self.frozen_frame = None
         self.last_full_canvas = None
         
-        # UI 및 색상 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
@@ -31,14 +30,13 @@ class VisionInspector:
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
-        # [재배치] 8행 2열 레이아웃 및 측정 모드 세분화
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'],
             ['LOAD_DXF', 'DXF_COLOR'],
             ['PAN', 'ZOOM'],
             ['ROTATE', 'CLEAR'],
             ['MEAS_P2P', 'MEAS_HV'],
-            ['MEAS_COLOR', 'MEAS_UNDO'], # 측정 취소(UNDO) 추가
+            ['MEAS_COLOR', 'MEAS_UNDO'],
             ['CALIB', 'CALIB_COLOR'],
             ['SAVE_IMG', 'QUIT']
         ]
@@ -49,8 +47,7 @@ class VisionInspector:
         self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
         self.angle = 0.0
         
-        self.measurements = [] # [(p1, p2, val, type)]
-        self.measure_p1 = None
+        self.measurements = []; self.measure_p1 = None
         self.calib_p1 = None; self.calib_p2 = None; self.fixed_calib_line = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
 
@@ -101,8 +98,7 @@ class VisionInspector:
             active = (mode == self.current_mode); pressed = (mode == self.pressed_button)
             b_clr = self.clr_pressed if pressed else (self.clr_primary if active else (255, 255, 255))
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
-            cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
-            cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
+            cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1); cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
             display_img = self.draw_text_pretty(display_img, mode.replace('_', ' '), (x1 + 5, y1 + 5), size=10, color=t_clr, bold=active)
         
         mag_size = 200; mag_margin = 25
@@ -110,12 +106,10 @@ class VisionInspector:
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
         if self.curr_mx < self.view_w:
-            w_ratio = self.cam_w / self.view_w
-            rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
+            w_ratio = self.cam_w / self.view_w; rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
             roi_s = 30; y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s); x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
             if y2 > y1 and x2 > x1:
-                roi = self.last_full_canvas[y1:y2, x1:x2]
-                roi_res = cv2.resize(roi, (mag_size, mag_size), interpolation=cv2.INTER_NEAREST)
+                roi = self.last_full_canvas[y1:y2, x1:x2]; roi_res = cv2.resize(roi, (mag_size, mag_size), interpolation=cv2.INTER_NEAREST)
                 display_img[mag_y1:mag_y2, mag_x1:mag_x2] = roi_res
                 cv2.line(display_img, (mag_x1 + mag_size//2, mag_y1), (mag_x1 + mag_size//2, mag_y2), (0, 255, 0), 1)
                 cv2.line(display_img, (mag_x1, mag_y1 + mag_size//2), (mag_x2, mag_y1 + mag_size//2), (0, 255, 0), 1)
@@ -138,9 +132,9 @@ class VisionInspector:
                     elif m == 'DXF_COLOR': self.idx_dxf_color = (self.idx_dxf_color + 1) % len(self.color_palette)
                     elif m == 'MEAS_COLOR': self.idx_meas_color = (self.idx_meas_color + 1) % len(self.color_palette)
                     elif m == 'CALIB_COLOR': self.idx_calib_color = (self.idx_calib_color + 1) % len(self.color_palette)
-                    elif m == 'MEAS_UNDO': # [신규] 측정 취소 기능
-                        if self.measure_p1: self.measure_p1 = None # 찍던 중이면 점 취소
-                        elif self.measurements: self.measurements.pop() # 완료된 거면 마지막 수치 삭제
+                    elif m == 'MEAS_UNDO':
+                        if self.measure_p1: self.measure_p1 = None
+                        elif self.measurements: self.measurements.pop()
                     elif m == 'SAVE_IMG':
                         fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
                         cv2.imwrite(fn, self.last_full_canvas)
@@ -148,7 +142,8 @@ class VisionInspector:
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")]); root.destroy()
                         if path: self.dxf_contours, self.dxf_real_width = self.load_dxf(path); self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0; self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
-                    elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None; self.scale = 1.0; self.angle = 0.0
+                    elif m == 'CLEAR': # [수정] 도면 scale은 유지하고 측정만 삭제
+                        self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None
                     elif m == 'QUIT': sys.exit()
                     else: self.current_mode = m; self.measure_p1 = None
                     return
@@ -161,10 +156,8 @@ class VisionInspector:
             elif 'MEAS' in self.current_mode:
                 if self.measure_p1 is None: self.measure_p1 = (rx, ry)
                 else:
-                    p1, p2 = np.array(self.measure_p1), np.array([rx, ry])
-                    dist_px = np.linalg.norm(p1 - p2)
-                    if self.current_mode == 'MEAS_HV': # 수평/수직 보정 거리
-                        dist_px = max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
+                    p1, p2 = np.array(self.measure_p1), np.array([rx, ry]); dist_px = np.linalg.norm(p1 - p2)
+                    if self.current_mode == 'MEAS_HV': dist_px = max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
                     self.measurements.append((self.measure_p1, (rx, ry), dist_px / self.scale, self.current_mode))
                     self.measure_p1 = None
         
@@ -190,6 +183,10 @@ class VisionInspector:
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
         while True:
+            # [중요] 윈도우 창 닫기 감지 로직
+            if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1:
+                break
+            
             if self.is_frozen: frame = self.frozen_frame.copy()
             else: 
                 ret, frame = self.cap.read()
@@ -203,7 +200,7 @@ class VisionInspector:
                 cv2.line(canvas, p1i, p2i, calib_clr, 2); cv2.putText(canvas, f"REF: {val:.1f}mm", (p1i[0], p1i[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
             for m1, m2, val, m_type in self.measurements:
                 p1, p2 = (int(m1[0]), int(m1[1])), (int(m2[0]), int(m2[1]))
-                if m_type == 'MEAS_HV': # 수평/수직 가이드 보정
+                if m_type == 'MEAS_HV':
                     if abs(p1[0]-p2[0]) > abs(p1[1]-p2[1]): cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 2); p2 = (p2[0], p1[1])
                     else: cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 2); p2 = (p1[0], p2[1])
                 else: cv2.line(canvas, p1, p2, meas_clr, 2)
@@ -214,7 +211,7 @@ class VisionInspector:
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8); display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
             cv2.imshow('Vision Inspector', display_img)
             if cv2.waitKey(1) == ord('q'): break
-        self.cap.release(); cv2.destroyAllWindows()
+        self.cap.release(); cv2.destroyAllWindows(); sys.exit()
 
 if __name__ == "__main__":
     inspector = VisionInspector(); inspector.run()
