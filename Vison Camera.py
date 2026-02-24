@@ -4,41 +4,69 @@ import ezdxf
 import os
 from datetime import datetime
 import tkinter as tk
-from tkinter import filedialog, simpledialog # 팝업 입력창 추가
+from tkinter import filedialog, simpledialog
 from PIL import ImageFont, ImageDraw, Image
 
 class VisionInspector:
     def __init__(self, dxf_path=""):
         self.dxf_path = dxf_path
+        self.cam_index_list = [1, 2, 3, 0] # USB 포트(1,2,3)를 먼저, 내장(0)을 마지막에 탐색
+        self.current_cam_idx_ptr = 0
         self.cap = self.auto_find_camera()
-        if self.cap is None: exit()
+        
+        if self.cap is None:
+            print("❌ 카메라를 찾을 수 없습니다."); exit()
+            
+        self.setup_camera()
+        
+        # UI 설정
+        self.view_w, self.ui_w = 1200, 280
+        self.total_w = self.view_w + self.ui_w
+        self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217); self.clr_text = (33, 37, 41)
+        
+        # [수정] SWITCH_CAM 모드 추가
+        self.modes = ['SWITCH_CAM', 'LOAD_DXF', 'PAN', 'ZOOM', 'ROTATE', 'MEASURE', 'CALIB', 'SAVE_IMG', 'CLEAR', 'QUIT']
+        self.current_mode = 'PAN'; self.buttons = {}; self.init_buttons()
+        
+        self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
+        self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
+        self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
+        self.angle = 0.0; self.measurements = []; self.calib_p1 = None
+        self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
+
+    def setup_camera(self):
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         cv2.waitKey(500)
         ret, frame = self.cap.read()
-        if not ret: exit()
-        self.cam_h, self.cam_w = frame.shape[:2]
-        self.view_w = 1200
-        self.view_h = int(self.cam_h * (self.view_w / self.cam_w))
-        self.ui_w = 280
-        self.total_w = self.view_w + self.ui_w
-        self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217); self.clr_text = (33, 37, 41)
-        self.modes = ['LOAD_DXF', 'PAN', 'ZOOM', 'ROTATE', 'MEASURE', 'CALIB', 'SAVE_IMG', 'CLEAR', 'QUIT']
-        self.current_mode = 'PAN'; self.buttons = {}; self.init_buttons()
-        self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
-        self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
-        self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
-        self.angle = 0.0; self.measurements = []; self.calib_p1 = None; self.calib_p2 = None
-        self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
+        if ret:
+            self.cam_h, self.cam_w = frame.shape[:2]
+            self.view_h = int(self.cam_h * (1200 / self.cam_w))
 
     def auto_find_camera(self):
-        for i in [1, 2, 0, 3]:
+        for i in self.cam_index_list:
             cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
             if cap.isOpened():
                 ret, frame = cap.read()
-                if ret and frame is not None: return cap
+                if ret and frame is not None:
+                    self.current_cam_idx_ptr = self.cam_index_list.index(i)
+                    return cap
             cap.release()
         return None
+
+    def switch_camera(self):
+        # 다음 카메라 인덱스로 넘어가기
+        self.current_cam_idx_ptr = (self.current_cam_idx_ptr + 1) % len(self.cam_index_list)
+        new_idx = self.cam_index_list[self.current_cam_idx_ptr]
+        
+        if self.cap: self.cap.release()
+        self.cap = cv2.VideoCapture(new_idx, cv2.CAP_DSHOW)
+        if self.cap.isOpened():
+            self.setup_camera()
+            print(f"✅ 카메라 전환 성공: Index {new_idx}")
+        else:
+            print(f"⚠️ Index {new_idx} 연결 실패, 다시 시도합니다.")
+            self.switch_camera()
 
     def load_dxf(self, path):
         if not path or not os.path.exists(path): return [], 0
@@ -51,15 +79,14 @@ class VisionInspector:
         return [c - center for c in contours], dxf_w
 
     def init_buttons(self):
-        btn_h = 45; margin = 12; start_y = 60
+        btn_h = 42; margin = 10; start_y = 60
         for i, mode in enumerate(self.modes):
             y1 = start_y + i * (btn_h + margin)
-            self.buttons[mode] = (self.view_w + margin, y1, self.total_w - margin, y1 + btn_h)
+            self.buttons[mode] = (self.view_w + 15, y1, self.total_w - 15, y1 + btn_h)
 
-    def draw_text_pretty(self, img, text, pos, size=16, color=(33, 37, 41), bold=False):
+    def draw_text_pretty(self, img, text, pos, size=15, color=(33, 37, 41), bold=False):
         img_pil = Image.fromarray(img); draw = ImageDraw.Draw(img_pil)
-        try:
-            font = ImageFont.truetype("malgun.ttf" if not bold else "malgunbd.ttf", size)
+        try: font = ImageFont.truetype("malgun.ttf" if not bold else "malgunbd.ttf", size)
         except: font = ImageFont.load_default()
         draw.text(pos, text, font=font, fill=(color[2], color[1], color[0]))
         return np.array(img_pil)
@@ -67,20 +94,21 @@ class VisionInspector:
     def draw_ui(self, display_img):
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, self.view_h), self.clr_bg, -1)
         cv2.line(display_img, (self.view_w, 0), (self.view_w, self.view_h), (222, 226, 230), 1)
-        display_img = self.draw_text_pretty(display_img, "CONTROLS", (self.view_w + 20, 20), size=20, bold=True, color=self.clr_primary)
+        display_img = self.draw_text_pretty(display_img, "VISION CONTROL", (self.view_w + 20, 20), size=18, bold=True, color=self.clr_primary)
+        
         for mode, (x1, y1, x2, y2) in self.buttons.items():
             active = (mode == self.current_mode); b_clr = self.clr_primary if active else (255, 255, 255); t_clr = (255, 255, 255) if active else self.clr_text
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
             cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
-            display_img = self.draw_text_pretty(display_img, mode, (x1 + 15, y1 + 10), color=t_clr, bold=active)
+            display_img = self.draw_text_pretty(display_img, mode, (x1 + 12, y1 + 10), color=t_clr, bold=active)
         return display_img
 
     def mouse_callback(self, event, x, y, flags, param):
-        self.curr_mx, self.curr_my = x, y
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
                 if bx1 <= x <= bx2 and by1 <= y <= by2:
-                    if m == 'LOAD_DXF': self.open_file_dialog()
+                    if m == 'SWITCH_CAM': self.switch_camera() # [추가] 카메라 전환 기능 실행
+                    elif m == 'LOAD_DXF': self.open_file_dialog()
                     elif m == 'SAVE_IMG': cv2.imwrite(f'Cap_{datetime.now().strftime("%H%M%S")}.jpg', self.last_canvas)
                     elif m == 'CLEAR': self.measurements = []; self.calib_p1 = None; self.scale = 1.0; self.angle = 0.0
                     elif m == 'QUIT': self.current_mode = 'QUIT'
@@ -101,8 +129,7 @@ class VisionInspector:
                 dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
                 if dist_px > 10:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                    # [수정] input() 대신 팝업창 사용
-                    val = simpledialog.askfloat("Calibration", "실제 길이(mm)를 입력하세요:", parent=root)
+                    val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root)
                     if val: self.scale = dist_px / val
                     root.destroy()
             self.is_dragging = False
@@ -120,12 +147,11 @@ class VisionInspector:
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
         while self.current_mode != 'QUIT':
             ret, frame = self.cap.read()
-            if not ret: break
+            if not ret: continue
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
-            # [수정] 도면 선 굵기 1로 얇게 조정
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
-                cv2.polylines(canvas, [pts_draw], True, (0, 255, 0), 1)
+                cv2.polylines(canvas, [pts_draw], True, (0, 255, 0), 1) # 얇은 선 두께 유지
             self.last_canvas = canvas.copy(); res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8)
             display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
