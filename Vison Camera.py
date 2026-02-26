@@ -3,6 +3,7 @@ import numpy as np
 import ezdxf
 import os
 import sys
+import time
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, simpledialog
@@ -11,27 +12,27 @@ from PIL import ImageFont, ImageDraw, Image
 class VisionInspector:
     def __init__(self, dxf_path=""):
         self.dxf_path = dxf_path
-        self.cam_index_list = [1, 2, 3, 0]
+        self.cam_index_list = [1, 2, 3, 0, 4, 5] # 탐색 범위를 넓힘
         self.current_cam_idx_ptr = 0
-        self.cap = self.auto_find_camera()
-        if self.cap is None: sys.exit()
-        self.setup_camera()
+        self.cap = None
+        self.is_running = True
         
-        self.is_running = True # 종료 제어용 플래그
-        self.is_frozen = False
-        self.frozen_frame = None
-        self.last_full_canvas = None
-        
-        # UI 및 색상 설정
+        # 첫 카메라 탐색 및 연결
+        if not self.try_connect_camera(self.cam_index_list[0]):
+            self.cap = self.auto_find_camera()
+            
+        if self.cap is None:
+            print("❌ 카메라를 찾을 수 없습니다."); sys.exit()
+            
+        # 상태 및 UI 설정
+        self.is_frozen = False; self.frozen_frame = None; self.last_full_canvas = None
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
-        
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
-        # 8행 2열 레이아웃
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'],
             ['LOAD_DXF', 'DXF_COLOR'],
@@ -42,32 +43,53 @@ class VisionInspector:
             ['CALIB', 'CALIB_COLOR'],
             ['SAVE_IMG', 'QUIT']
         ]
-        
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
         self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
-        
-        # 초기 위치 및 배율 설정
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
-        self.angle = 0.0
-        
-        self.measurements = []; self.measure_p1 = None
+        self.angle = 0.0; self.measurements = []; self.measure_p1 = None
         self.calib_p1 = None; self.calib_p2 = None; self.fixed_calib_line = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
 
-    def setup_camera(self):
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        cv2.waitKey(500); ret, frame = self.cap.read()
-        if ret: self.cam_h, self.cam_w = frame.shape[:2]; self.view_h = int(self.cam_h * (1200 / self.cam_w))
+    def try_connect_camera(self, idx):
+        """특정 인덱스의 카메라 연결 시도 및 해상도 최적화"""
+        if self.cap: self.cap.release()
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not self.cap.isOpened(): return False
+        
+        # 해상도 설정 시도
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        
+        # 카메라가 깨어날 시간 대기
+        time.sleep(1.0) 
+        
+        ret, frame = self.cap.read()
+        if ret and frame is not None:
+            self.cam_h, self.cam_w = frame.shape[:2]
+            self.view_h = int(self.cam_h * (1200 / self.cam_w))
+            print(f"✅ Camera Index {idx} 연결 성공 ({self.cam_w}x{self.cam_h})")
+            return True
+        return False
 
     def auto_find_camera(self):
+        """사용 가능한 모든 포트 자동 탐색"""
         for i in self.cam_index_list:
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            if cap.isOpened():
-                ret, frame = cap.read()
-                if ret and frame is not None: return cap
-            cap.release()
+            if self.try_connect_camera(i):
+                self.current_cam_idx_ptr = self.cam_index_list.index(i)
+                return self.cap
         return None
+
+    def switch_camera(self):
+        """다음 카메라로 순환 전환"""
+        print("🔄 카메라 전환 시도 중...")
+        for _ in range(len(self.cam_index_list)):
+            self.current_cam_idx_ptr = (self.current_cam_idx_ptr + 1) % len(self.cam_index_list)
+            target_idx = self.cam_index_list[self.current_cam_idx_ptr]
+            if self.try_connect_camera(target_idx):
+                self.is_frozen = False
+                return
+        print("⚠️ 사용 가능한 다른 카메라가 없습니다.")
 
     def load_dxf(self, path):
         if not path or not os.path.exists(path): return [], 0
@@ -84,6 +106,7 @@ class VisionInspector:
         col_w = (self.ui_w - 30 - margin_x) // 2
         for r, row in enumerate(self.modes_grid):
             for c, mode in enumerate(row):
+                if not mode: continue
                 x1 = self.view_w + 15 + (c * (col_w + margin_x))
                 y1 = start_y + r * (btn_h + margin_y)
                 self.buttons[mode] = (x1, y1, x1 + col_w, y1 + btn_h)
@@ -130,9 +153,7 @@ class VisionInspector:
                             ret, frame = self.cap.read()
                             if ret: self.frozen_frame = frame.copy(); self.is_frozen = True
                         else: self.is_frozen = False
-                    elif m == 'SWITCH_CAM': 
-                        self.current_cam_idx_ptr = (self.current_cam_idx_ptr + 1) % len(self.cam_index_list)
-                        self.cap.release(); self.cap = cv2.VideoCapture(self.cam_index_list[self.current_cam_idx_ptr], cv2.CAP_DSHOW); self.setup_camera()
+                    elif m == 'SWITCH_CAM': self.switch_camera()
                     elif m == 'DXF_COLOR': self.idx_dxf_color = (self.idx_dxf_color + 1) % len(self.color_palette)
                     elif m == 'MEAS_COLOR': self.idx_meas_color = (self.idx_meas_color + 1) % len(self.color_palette)
                     elif m == 'CALIB_COLOR': self.idx_calib_color = (self.idx_calib_color + 1) % len(self.color_palette)
@@ -146,9 +167,8 @@ class VisionInspector:
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")]); root.destroy()
                         if path: self.dxf_contours, self.dxf_real_width = self.load_dxf(path); self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0; self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
-                    elif m == 'CLEAR': # [수정] 도면 위치/배율은 남기고 측정값만 청소
-                        self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None
-                    elif m == 'QUIT': self.is_running = False # 안전 종료
+                    elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None
+                    elif m == 'QUIT': self.is_running = False
                     else: self.current_mode = m; self.measure_p1 = None
                     return
         if event == cv2.EVENT_LBUTTONUP: self.pressed_button = None
@@ -186,21 +206,25 @@ class VisionInspector:
     def run(self):
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
-        while self.is_running: # 플래그 기반 루프
-            if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1:
-                break
+        while self.is_running:
+            if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1: break
             
             if self.is_frozen: frame = self.frozen_frame.copy()
             else: 
                 ret, frame = self.cap.read()
                 if not ret: continue
+            
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
             dxf_clr = self.color_palette[self.idx_dxf_color]; meas_clr = self.color_palette[self.idx_meas_color]; calib_clr = self.color_palette[self.idx_calib_color]
+            
             for pts in self.dxf_contours:
-                pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32); cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
+                pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
+                cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
+            
             if self.fixed_calib_line:
                 p1, p2, val = self.fixed_calib_line; p1i, p2i = (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1]))
                 cv2.line(canvas, p1i, p2i, calib_clr, 2); cv2.putText(canvas, f"REF: {val:.1f}mm", (p1i[0], p1i[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
+            
             for m1, m2, val, m_type in self.measurements:
                 p1, p2 = (int(m1[0]), int(m1[1])), (int(m2[0]), int(m2[1]))
                 if m_type == 'MEAS_HV':
@@ -208,8 +232,10 @@ class VisionInspector:
                     else: cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 2); p2 = (p1[0], p2[1])
                 else: cv2.line(canvas, p1, p2, meas_clr, 2)
                 cv2.putText(canvas, f"{val:.3f}mm", (p2[0]+10, p2[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 2)
+            
             if self.measure_p1: cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 2)
             if self.calib_p1 and self.calib_p2: cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 2)
+            
             self.last_full_canvas = canvas.copy(); res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8); display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
             cv2.imshow('Vision Inspector', display_img)
