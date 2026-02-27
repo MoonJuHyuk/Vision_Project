@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import datetime
 import tkinter as tk
-from tkinter import filedialog, simpledialog
+from tkinter import filedialog, simpledialog, messagebox # messagebox 추가
 from PIL import ImageFont, ImageDraw, Image
 
 class VisionInspector:
@@ -20,7 +20,7 @@ class VisionInspector:
         self.view_w, self.ui_w = 1200, 280; self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217); self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
-        self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 1 # 파란색 인덱스 유지
+        self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 1
         
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'], ['LOAD_DXF', 'DXF_COLOR'],
@@ -28,6 +28,7 @@ class VisionInspector:
             ['MEAS_P2P', 'MEAS_HV'], ['MEAS_COLOR', 'MEAS_UNDO'],
             ['CALIB', 'CALIB_COLOR'], ['SAVE_IMG', 'QUIT']
         ]
+        
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
         self.dxf_contours = []; self.dxf_real_width = 0
         self.setup_camera(); self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
@@ -126,10 +127,22 @@ class VisionInspector:
                         if self.measure_p2: self.measure_p2 = None; self.measure_p1 = None
                         elif self.measure_p1: self.measure_p1 = None
                         elif self.measurements: self.measurements.pop()
-                    elif m == 'SAVE_IMG':
+                    elif m == 'SAVE_IMG': # [수정] 한글 경로 저장 지원 로직
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                        path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=f'Insp_{datetime.now().strftime("%H%M%S")}.jpg', parent=root)
-                        if path: cv2.imwrite(path, self.last_full_canvas); root.destroy()
+                        default_name = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
+                        path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=default_name, filetypes=[("JPEG Image", "*.jpg")], parent=root)
+                        if path:
+                            try:
+                                # [핵심] 한글 경로 우회를 위해 메모리 버퍼 인코딩 후 저장
+                                res, img_buffer = cv2.imencode('.jpg', self.last_full_canvas)
+                                if res:
+                                    img_buffer.tofile(path)
+                                    messagebox.showinfo("저장 완료", f"이미지가 성공적으로 저장되었습니다.\n{os.path.basename(path)}", parent=root)
+                                else:
+                                    messagebox.showerror("저장 실패", "이미지 인코딩에 실패했습니다.", parent=root)
+                            except Exception as e:
+                                messagebox.showerror("저장 실패", f"에러 발생: {str(e)}", parent=root)
+                        root.destroy()
                     elif m == 'LOAD_DXF':
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")], parent=root); root.destroy()
@@ -141,13 +154,11 @@ class VisionInspector:
         if event == cv2.EVENT_LBUTTONUP: self.pressed_button = None
 
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
-        
-        # [추가] SHIFT 키 평행 보정 로직
         if flags & cv2.EVENT_FLAG_SHIFTKEY:
-            if self.measure_p1: # 측정 중
+            if self.measure_p1:
                 if abs(rx - self.measure_p1[0]) > abs(ry - self.measure_p1[1]): ry = self.measure_p1[1]
                 else: rx = self.measure_p1[0]
-            elif self.calib_p1: # 캘리브레이션 드래그 중
+            elif self.calib_p1:
                 if abs(rx - self.calib_p1[0]) > abs(ry - self.calib_p1[1]): ry = self.calib_p1[1]
                 else: rx = self.calib_p1[0]
 
@@ -180,7 +191,7 @@ class VisionInspector:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root); root.destroy()
                     if val: self.scale = dist_px / val; self.calib_temp_data = (self.calib_p1, (rx, ry), val)
-                self.calib_p1 = None; self.calib_p2 = None # 드래그 종료 후 초기화하여 유령 선 방지
+                self.calib_p1 = None; self.calib_p2 = None
             self.is_dragging = False
 
     def run(self):
@@ -197,7 +208,6 @@ class VisionInspector:
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32); cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
             
-            # [유령 선 방지] 데이터가 유효할 때만 그리기
             if self.fixed_calib_line:
                 p1, p2, val, pt = self.fixed_calib_line; cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 1); cv2.putText(canvas, f"REF: {val:.1f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
             for m1, m2, val, m_type, pt in self.measurements:
@@ -208,14 +218,13 @@ class VisionInspector:
                 else: cv2.line(canvas, p1, p2, meas_clr, 1)
                 cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
             
-            if self.measure_p2: # 3단계 배치 가이드
-                cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
+            if self.is_dragging and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
+                mx, my = int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w)); cv2.drawMarker(canvas, (mx, my), (0, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=30, thickness=1)
+            if self.measure_p2: cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
             elif self.measure_p1: cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 1)
             
-            if self.calib_temp_data:
-                cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
-            elif self.calib_p1 and self.calib_p2: # 드래그 중인 선
-                cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
+            if self.calib_temp_data: cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
+            elif self.calib_p1 and self.calib_p2: cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
 
             self.last_full_canvas = canvas.copy(); res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8); display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
