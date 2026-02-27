@@ -56,7 +56,7 @@ class VisionInspector:
 
     def switch_camera(self):
         old_cap = self.cap; new_cap = self.auto_scan_and_connect(self.current_cam_idx + 1)
-        if new_cap: old_cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False
+        if new_cap: old_cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False; self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
 
     def load_dxf_action(self, path):
         if not path or not os.path.exists(path): return
@@ -124,13 +124,22 @@ class VisionInspector:
                         if self.measure_p2: self.measure_p2 = None; self.measure_p1 = None
                         elif self.measure_p1: self.measure_p1 = None
                         elif self.measurements: self.measurements.pop()
-                    elif m == 'SAVE_IMG': # [수정] 한글 경로 저장 지원
-                        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                        path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=f'Insp_{datetime.now().strftime("%H%M%S")}.jpg', parent=root)
-                        if path:
-                            res, buffer = cv2.imencode('.jpg', self.last_full_canvas)
-                            if res: buffer.tofile(path); messagebox.showinfo("저장 완료", "이미지가 저장되었습니다.", parent=root)
-                        root.destroy()
+                    elif m == 'SAVE_IMG': # [핵심 수정] 물리적 파일 기록 보장 로직
+                        if self.last_full_canvas is not None:
+                            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                            default_name = f'Insp_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
+                            path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=default_name, filetypes=[("JPEG Image", "*.jpg")], parent=root)
+                            if path:
+                                try:
+                                    res, buffer = cv2.imencode('.jpg', self.last_full_canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                                    if res:
+                                        # [수정] open/write 방식을 사용하여 확실하게 디스크에 기록
+                                        with open(path, "wb") as f:
+                                            f.write(buffer.tobytes())
+                                        messagebox.showinfo("저장 성공", f"이미지가 성공적으로 저장되었습니다.\n{os.path.basename(path)}", parent=root)
+                                    else: messagebox.showerror("저장 실패", "이미지 인코딩에 실패했습니다.", parent=root)
+                                except Exception as e: messagebox.showerror("저장 실패", f"에러: {str(e)}", parent=root)
+                            root.destroy()
                     elif m == 'LOAD_DXF':
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")], parent=root); root.destroy()
@@ -142,7 +151,6 @@ class VisionInspector:
         if event == cv2.EVENT_LBUTTONUP: self.pressed_button = None
 
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
-        # [추가] SHIFT 키 평행 보정
         if flags & cv2.EVENT_FLAG_SHIFTKEY:
             if self.measure_p1:
                 if abs(rx - self.measure_p1[0]) > abs(ry - self.measure_p1[1]): ry = self.measure_p1[1]
@@ -180,7 +188,7 @@ class VisionInspector:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root); root.destroy()
                     if val: self.scale = dist_px / val; self.calib_temp_data = (self.calib_p1, (rx, ry), val)
-            self.is_dragging = False; self.calib_p1 = self.calib_p2 = None # 유령 선 방지
+            self.is_dragging = False; self.calib_p1 = self.calib_p2 = None
 
     def run(self):
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_AUTOSIZE)
@@ -204,7 +212,6 @@ class VisionInspector:
                     else: cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 1); p2 = (p1[0], p2[1])
                 else: cv2.line(canvas, p1, p2, meas_clr, 1)
                 cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
-            # 드래그 마커 및 가이드 표시
             if self.is_dragging and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
                 mx, my = int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w)); cv2.drawMarker(canvas, (mx, my), (0, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=25, thickness=1)
             if self.measure_p2: cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
