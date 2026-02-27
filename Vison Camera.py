@@ -18,9 +18,24 @@ class VisionInspector:
         
         self.is_running = True; self.is_frozen = False; self.frozen_frame = None; self.last_full_canvas = None
         self.view_w, self.ui_w = 1200, 280; self.total_w = self.view_w + self.ui_w
-        self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217); self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
+        
+        # 색상 테마 설정
+        self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
+        self.clr_pressed = (20, 60, 140); self.clr_text = (33, 37, 41)
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 1
+        
+        # 버튼 내부 모드와 한글 라벨 매칭
+        self.btn_labels = {
+            'SWITCH_CAM': '카메라 전환', 'FREEZE_LIVE': '정지 / 라이브',
+            'LOAD_DXF': '도면 불러오기', 'DXF_COLOR': '도면 색상',
+            'PAN': '이동 (PAN)', 'ZOOM': '확대 / 축소',
+            'ROTATE': '회전 (Angle)', 'CLEAR': '전체 삭제',
+            'MEAS_P2P': '직선 측정', 'MEAS_HV': '수평수직 측정',
+            'MEAS_COLOR': '측정 색상', 'MEAS_UNDO': '측정 취소',
+            'CALIB': '캘리브레이션', 'CALIB_COLOR': '캘리브 색상',
+            'SAVE_IMG': '이미지 저장', 'QUIT': '프로그램 종료'
+        }
         
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'], ['LOAD_DXF', 'DXF_COLOR'],
@@ -56,7 +71,7 @@ class VisionInspector:
 
     def switch_camera(self):
         old_cap = self.cap; new_cap = self.auto_scan_and_connect(self.current_cam_idx + 1)
-        if new_cap: old_cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False; self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
+        if new_cap: old_cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False
 
     def load_dxf_action(self, path):
         if not path or not os.path.exists(path): return
@@ -81,21 +96,37 @@ class VisionInspector:
     def draw_ui(self, display_img):
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, self.view_h), self.clr_bg, -1)
         cv2.line(display_img, (self.view_w, 0), (self.view_w, self.view_h), (222, 226, 230), 1)
+        
         img_pil = Image.fromarray(display_img); draw = ImageDraw.Draw(img_pil)
-        try: font_b = ImageFont.truetype("malgunbd.ttf", 15); font_s = ImageFont.truetype("malgun.ttf", 10)
-        except: font_b = font_s = ImageFont.load_default()
-        draw.text((self.view_w + 20, 10), "VISION CONTROL", font=font_b, fill=(217, 116, 54))
+        try: 
+            font_b = ImageFont.truetype("malgunbd.ttf", 15)
+            font_btn = ImageFont.truetype("malgunbd.ttf", 10)
+        except: font_b = font_btn = ImageFont.load_default()
+        
+        draw.text((self.view_w + 20, 10), "VISION 제어 센터", font=font_b, fill=(217, 116, 54))
+        
         for mode, (x1, y1, x2, y2) in self.buttons.items():
             active = (mode == self.current_mode); pressed = (mode == self.pressed_button)
+            
+            # 버튼 배경색 결정
             b_clr = self.clr_pressed if pressed else (self.clr_primary if active else (255, 255, 255))
+            # 버튼 글자색 결정 (대비 강화)
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
-            cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1); cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
-            draw.text((x1 + 5, y1 + 7), mode.replace('_', ' '), font=font_s, fill=(t_clr[2], t_clr[1], t_clr[0]))
+            
+            cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
+            cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
+            
+            # PIL로 한글 텍스트 그리기
+            label = self.btn_labels.get(mode, mode)
+            draw.text((x1 + 8, y1 + 7), label, font=font_btn, fill=(t_clr[2], t_clr[1], t_clr[0]))
+            
         display_img = np.array(img_pil)
+        
+        # 돋보기 창
         mag_size, mag_margin = 200, 25; mag_y1, mag_y2 = self.view_h - mag_size - mag_margin, self.view_h - mag_margin
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
-        if self.curr_mx < self.view_w:
+        if self.curr_mx < self.view_w and self.last_full_canvas is not None:
             w_ratio = self.cam_w / self.view_w; rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
             roi_s = 30; y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s); x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
             if y2 > y1 and x2 > x1:
@@ -124,25 +155,21 @@ class VisionInspector:
                         if self.measure_p2: self.measure_p2 = None; self.measure_p1 = None
                         elif self.measure_p1: self.measure_p1 = None
                         elif self.measurements: self.measurements.pop()
-                    elif m == 'SAVE_IMG': # [핵심 수정] 물리적 파일 기록 보장 로직
+                    elif m == 'SAVE_IMG':
                         if self.last_full_canvas is not None:
                             root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                            default_name = f'Insp_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
-                            path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=default_name, filetypes=[("JPEG Image", "*.jpg")], parent=root)
+                            path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=f'검사결과_{datetime.now().strftime("%H%M%S")}.jpg', parent=root)
                             if path:
                                 try:
                                     res, buffer = cv2.imencode('.jpg', self.last_full_canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
                                     if res:
-                                        # [수정] open/write 방식을 사용하여 확실하게 디스크에 기록
-                                        with open(path, "wb") as f:
-                                            f.write(buffer.tobytes())
-                                        messagebox.showinfo("저장 성공", f"이미지가 성공적으로 저장되었습니다.\n{os.path.basename(path)}", parent=root)
-                                    else: messagebox.showerror("저장 실패", "이미지 인코딩에 실패했습니다.", parent=root)
-                                except Exception as e: messagebox.showerror("저장 실패", f"에러: {str(e)}", parent=root)
+                                        with open(path, "wb") as f: f.write(buffer.tobytes())
+                                        messagebox.showinfo("완료", "이미지가 성공적으로 저장되었습니다.", parent=root)
+                                except: messagebox.showerror("실패", "저장 중 오류가 발생했습니다.", parent=root)
                             root.destroy()
                     elif m == 'LOAD_DXF':
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                        path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")], parent=root); root.destroy()
+                        path = filedialog.askopenfilename(filetypes=[("DXF 도면", "*.dxf")], parent=root); root.destroy()
                         if path: self.load_dxf_action(path)
                     elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.measure_p2 = None; self.fixed_calib_line = None; self.calib_temp_data = None
                     elif m == 'QUIT': self.is_running = False
@@ -186,7 +213,7 @@ class VisionInspector:
                 dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
                 if dist_px > 10:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                    val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root); root.destroy()
+                    val = simpledialog.askfloat("캘리브레이션", "실제 길이(mm)를 입력하세요:", parent=root); root.destroy()
                     if val: self.scale = dist_px / val; self.calib_temp_data = (self.calib_p1, (rx, ry), val)
             self.is_dragging = False; self.calib_p1 = self.calib_p2 = None
 
