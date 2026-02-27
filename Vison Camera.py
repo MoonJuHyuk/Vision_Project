@@ -13,22 +13,18 @@ class VisionInspector:
     def __init__(self, dxf_path=""):
         self.dxf_path = dxf_path
         self.current_cam_idx = 0
-        self.cap = self.auto_scan_and_connect(0) # 실행 시 사용 가능한 카메라 자동 탐색
+        self.cap = self.auto_scan_and_connect(0)
         if self.cap is None:
             print("❌ 초기 카메라 연결 실패. 프로그램을 종료합니다."); sys.exit()
             
         self.is_running = True; self.is_frozen = False; self.frozen_frame = None; self.last_full_canvas = None
-        
-        # UI 레이아웃 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
-        
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
-        # 버튼 그리드 정의 (8행 2열)
         self.modes_grid = [
             ['SWITCH_CAM', 'FREEZE_LIVE'], ['LOAD_DXF', 'DXF_COLOR'],
             ['PAN', 'ZOOM'], ['ROTATE', 'CLEAR'],
@@ -38,54 +34,43 @@ class VisionInspector:
         
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
         self.dxf_contours = []; self.dxf_real_width = 0
-        self.setup_camera(); # 카메라 해상도 및 뷰 크기 초기화
+        self.setup_camera()
         
-        # 초기 좌표 및 배율 설정
+        # [중요] 초기 배율 및 위치 설정
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = 1.0; self.angle = 0.0
         
-        # 측정/캘리브 데이터 관리
         self.measurements = []; self.measure_p1 = None; self.measure_p2 = None; self.measure_temp_val = 0
         self.calib_p1 = None; self.calib_p2 = None; self.calib_temp_data = None; self.fixed_calib_line = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
-        
         if dxf_path: self.load_dxf_action(dxf_path)
 
     def setup_camera(self):
-        """현재 연결된 카메라의 해상도를 감지하고 뷰 크기를 계산합니다"""
         ret, frame = self.cap.read()
         if ret:
             self.cam_h, self.cam_w = frame.shape[:2]
             self.view_h = int(self.cam_h * (1200 / self.cam_w))
 
     def auto_scan_and_connect(self, start_idx):
-        """작동 가능한 카메라 장치를 순차적으로 탐색합니다"""
-        for i in range(start_idx, start_idx + 6): # 탐색 범위를 6개로 최적화
+        for i in range(start_idx, start_idx + 6):
             idx = i % 6
-            print(f"🔍 카메라 인덱스 {idx} 확인 중...")
             tmp_cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
             if tmp_cap.isOpened():
                 tmp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); tmp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-                time.sleep(0.8) # 응답 대기 시간
-                ret, frame = tmp_cap.read()
+                time.sleep(0.8); ret, frame = tmp_cap.read()
                 if ret and frame is not None:
                     self.current_cam_idx = idx; return tmp_cap
             tmp_cap.release()
         return None
 
     def switch_camera(self):
-        """다음 카메라로 장치를 전환합니다"""
-        print("🔄 카메라 전환을 시도합니다.")
         old_cap = self.cap
         new_cap = self.auto_scan_and_connect(self.current_cam_idx + 1)
         if new_cap:
             old_cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False
-            self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2 # 뷰 센터 재정렬
-        else:
-            print("⚠️ 추가 연결된 카메라가 없습니다.")
+            self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
 
     def load_dxf_action(self, path):
-        """도면 파일을 읽어와 배율을 유지하며 화면에 배치합니다"""
         if not path or not os.path.exists(path): return
         try:
             doc = ezdxf.readfile(path); msp = doc.modelspace(); contours, all_pts = [], []
@@ -95,9 +80,7 @@ class VisionInspector:
             all_pts = np.array(all_pts); center = np.mean(all_pts, axis=0)
             self.dxf_contours = [c - center for c in contours]
             self.dxf_real_width = np.max(all_pts[:, 0]) - np.min(all_pts[:, 0])
-            # 배율이 초기 상태(1.0)일 때만 자동 피팅
             if self.scale <= 1.1: self.scale = (self.cam_w * 0.5) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
-            print(f"📂 도면 로드 완료: {os.path.basename(path)}")
         except Exception as e: print(f"❌ 도면 로드 에러: {e}")
 
     def init_buttons(self):
@@ -105,6 +88,7 @@ class VisionInspector:
         col_w = (self.ui_w - 30 - margin_x) // 2
         for r, row in enumerate(self.modes_grid):
             for c, mode in enumerate(row):
+                if not mode: continue
                 x1 = self.view_w + 15 + (c * (col_w + margin_x))
                 y1 = start_y + r * (btn_h + margin_y)
                 self.buttons[mode] = (x1, y1, x1 + col_w, y1 + btn_h)
@@ -131,7 +115,8 @@ class VisionInspector:
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
         if self.curr_mx < self.view_w:
-            w_ratio = self.cam_w / self.view_w; rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
+            w_ratio = self.cam_w / self.view_w
+            rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
             roi_s = 30; y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s); x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
             if y2 > y1 and x2 > x1:
                 roi = self.last_full_canvas[y1:y2, x1:x2]; roi_res = cv2.resize(roi, (mag_size, mag_size), interpolation=cv2.INTER_NEAREST)
@@ -144,8 +129,8 @@ class VisionInspector:
         self.curr_mx, self.curr_my = x, y
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
-                if bx1 <= x <= bx2 and by1 <= y <= by2: # 정확한 클릭 영역 감지
-                    self.pressed_button = m; print(f"🔘 버튼 클릭: {m}")
+                if bx1 <= x <= bx2 and by1 <= y <= by2:
+                    self.pressed_button = m
                     if m == 'FREEZE_LIVE':
                         if not self.is_frozen:
                             ret, frame = self.cap.read()
@@ -161,9 +146,9 @@ class VisionInspector:
                         elif self.measurements: self.measurements.pop()
                     elif m == 'SAVE_IMG':
                         fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
-                        cv2.imwrite(fn, self.last_full_canvas); print(f"💾 이미지 저장: {fn}")
+                        cv2.imwrite(fn, self.last_full_canvas)
                     elif m == 'LOAD_DXF':
-                        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True) # 다이얼로그 최상단 강제
+                        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")], parent=root); root.destroy()
                         if path: self.load_dxf_action(path)
                     elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.measure_p2 = None; self.fixed_calib_line = None; self.calib_temp_data = None
@@ -174,24 +159,32 @@ class VisionInspector:
 
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
         if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
+            # [수정] 이동/회전 모드일 때 마우스 상태 초기화
+            if self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
+                self.is_dragging = True; self.lmx, self.lmy = x, y
+                return
+                
             if 'MEAS' in self.current_mode:
                 if self.measure_p1 is None: self.measure_p1 = (rx, ry)
                 elif self.measure_p2 is None: 
                     self.measure_p2 = (rx, ry); p1, p2 = np.array(self.measure_p1), np.array(self.measure_p2)
                     self.measure_temp_val = np.linalg.norm(p1-p2) if self.current_mode == 'MEAS_P2P' else max(abs(p1[0]-p2[0]), abs(p1[1]-p2[1]))
-                else: # 수치 배치 확정 (3클릭 방식)
+                else:
                     self.measurements.append((self.measure_p1, self.measure_p2, self.measure_temp_val/self.scale, self.current_mode, (rx, ry)))
                     self.measure_p1 = None; self.measure_p2 = None
             elif self.current_mode == 'CALIB':
                 if self.calib_temp_data: p1, p2, val = self.calib_temp_data; self.fixed_calib_line = (p1, p2, val, (rx, ry)); self.calib_temp_data = None
                 else: self.is_dragging = True; self.lmx, self.lmy = x, y; self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
+        
         elif event == cv2.EVENT_MOUSEMOVE and self.is_dragging:
-            if self.current_mode == 'CALIB': self.calib_p2 = (rx, ry)
+            # [수정] 도면 이동(PAN) 및 회전 로직 최적화
             dx, dy = (x - self.lmx) * w_ratio, (y - self.lmy) * w_ratio
             if self.current_mode == 'PAN': self.offset_x += dx; self.offset_y += dy
-            elif self.current_mode == 'ZOOM': self.scale *= (1 - dy * 0.005)
-            elif self.current_mode == 'ROTATE': self.angle += dx * 0.1
+            elif self.current_mode == 'ZOOM': self.scale *= (1 - (y - self.lmy) * 0.005)
+            elif self.current_mode == 'ROTATE': self.angle += (x - self.lmx) * 0.2
+            elif self.current_mode == 'CALIB': self.calib_p2 = (rx, ry)
             self.lmx, self.lmy = x, y
+            
         elif event == cv2.EVENT_LBUTTONUP:
             if self.is_dragging and self.current_mode == 'CALIB' and self.calib_p1:
                 dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
@@ -214,19 +207,29 @@ class VisionInspector:
             dxf_clr, meas_clr, calib_clr = self.color_palette[self.idx_dxf_color], self.color_palette[self.idx_meas_color], self.color_palette[self.idx_calib_color]
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32); cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
+            
+            # [수정] 텍스트 크기 0.5로 축소 및 표시 위치 최적화
             if self.fixed_calib_line:
-                p1, p2, val, pt = self.fixed_calib_line; cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 1); cv2.putText(canvas, f"REF: {val:.1f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
+                p1, p2, val, pt = self.fixed_calib_line; cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 1); cv2.putText(canvas, f"REF: {val:.1f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
             for m1, m2, val, m_type, pt in self.measurements:
                 p1, p2 = (int(m1[0]), int(m1[1])), (int(m2[0]), int(m2[1]))
                 if m_type == 'MEAS_HV':
                     if abs(p1[0]-p2[0]) > abs(p1[1]-p2[1]): cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 1); p2 = (p2[0], p1[1])
                     else: cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 1); p2 = (p1[0], p2[1])
                 else: cv2.line(canvas, p1, p2, meas_clr, 1)
-                cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 2)
-            if self.measure_p2: cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 1)
-            elif self.measure_p1: cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 2)
-            if self.calib_temp_data: cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 1)
+                cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
+            
+            # [추가] 드래그 중인 모드 시각화 (노란색 십자 마커)
+            if self.is_dragging and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
+                mx, my = int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))
+                cv2.drawMarker(canvas, (mx, my), (0, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=30, thickness=1)
+                cv2.putText(canvas, f"MOVING: {self.current_mode}", (mx+10, my-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+            if self.measure_p2: cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
+            elif self.measure_p1: cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 1)
+            if self.calib_temp_data: cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
             elif self.calib_p1 and self.calib_p2: cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
+            
             self.last_full_canvas = canvas.copy(); res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8); display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
             cv2.imshow('Vision Inspector', display_img)
