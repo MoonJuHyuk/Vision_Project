@@ -23,12 +23,10 @@ class VisionInspector:
         self.frozen_frame = None
         self.last_full_canvas = None
         
-        # UI 및 색상 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
-        
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
@@ -44,17 +42,12 @@ class VisionInspector:
         ]
         
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
-        
-        # 데이터 초기화
         self.dxf_contours = []; self.dxf_real_width = 0
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
-        self.scale = 1.0 # [중요] pixels per mm (초기값)
-        self.angle = 0.0
-        
+        self.scale = 1.0; self.angle = 0.0
         self.measurements = []; self.measure_p1 = None
         self.calib_p1 = None; self.calib_p2 = None; self.fixed_calib_line = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
-        
         if dxf_path: self.load_dxf_action(dxf_path)
 
     def setup_camera(self):
@@ -74,11 +67,9 @@ class VisionInspector:
     def switch_camera(self):
         self.current_cam_idx_ptr = (self.current_cam_idx_ptr + 1) % len(self.cam_index_list)
         new_cap = cv2.VideoCapture(self.cam_index_list[self.current_cam_idx_ptr], cv2.CAP_DSHOW)
-        if new_cap.isOpened():
-            self.cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False
+        if new_cap.isOpened(): self.cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False
 
     def load_dxf_action(self, path):
-        """도면 로드 시 배율을 강제 초기화하지 않도록 수정"""
         if not path or not os.path.exists(path): return
         doc = ezdxf.readfile(path); msp = doc.modelspace(); contours, all_pts = [], []
         for e in msp.query('LWPOLYLINE'):
@@ -87,7 +78,6 @@ class VisionInspector:
         all_pts = np.array(all_pts); center = np.mean(all_pts, axis=0)
         self.dxf_contours = [c - center for c in contours]
         self.dxf_real_width = np.max(all_pts[:, 0]) - np.min(all_pts[:, 0])
-        # 이미 캘리브레이션이 되어 있다면 해당 scale 유지, 아니면 임시 설정
         if self.scale <= 1.1: self.scale = (self.cam_w * 0.5) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
 
     def init_buttons(self):
@@ -155,7 +145,7 @@ class VisionInspector:
                     elif m == 'LOAD_DXF':
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")]); root.destroy()
-                        if path: self.load_dxf_action(path) # [수정] 배율 유지 로직 적용
+                        if path: self.load_dxf_action(path)
                     elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None
                     elif m == 'QUIT': self.is_running = False
                     else: self.current_mode = m; self.measure_p1 = None
@@ -188,7 +178,7 @@ class VisionInspector:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root)
                     if val: 
-                        self.scale = dist_px / val # [중요] 절대 scale 값 설정
+                        self.scale = dist_px / val
                         self.fixed_calib_line = (self.calib_p1, (rx, ry), val)
                     root.destroy()
                 self.calib_p1 = None; self.calib_p2 = None
@@ -206,25 +196,31 @@ class VisionInspector:
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
             dxf_clr = self.color_palette[self.idx_dxf_color]; meas_clr = self.color_palette[self.idx_meas_color]; calib_clr = self.color_palette[self.idx_calib_color]
             
-            # [수정] 도면도 절대 scale을 적용하여 그리기
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
-                cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
+                cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1) # 두께 1 유지
             
             if self.fixed_calib_line:
                 p1, p2, val = self.fixed_calib_line; p1i, p2i = (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1]))
-                cv2.line(canvas, p1i, p2i, calib_clr, 2); cv2.putText(canvas, f"REF: {val:.1f}mm", (p1i[0], p1i[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
+                cv2.line(canvas, p1i, p2i, calib_clr, 1) # 선 굵기 작게(1) 조정
+                # [수정] 수치 표시를 마지막 클릭 지점(p2i) 근처로 변경
+                cv2.putText(canvas, f"REF: {val:.1f}mm", (p2i[0]+10, p2i[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
             
             for m1, m2, val, m_type in self.measurements:
                 p1, p2 = (int(m1[0]), int(m1[1])), (int(m2[0]), int(m2[1]))
                 if m_type == 'MEAS_HV':
-                    if abs(p1[0]-p2[0]) > abs(p1[1]-p2[1]): cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 2); p2 = (p2[0], p1[1])
-                    else: cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 2); p2 = (p1[0], p2[1])
-                else: cv2.line(canvas, p1, p2, meas_clr, 2)
-                cv2.putText(canvas, f"{val:.3f}mm", (p2[0]+10, p2[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 2)
+                    if abs(p1[0]-p2[0]) > abs(p1[1]-p2[1]): 
+                        cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 1); p2 = (p2[0], p1[1])
+                    else: 
+                        cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 1); p2 = (p1[0], p2[1])
+                else: 
+                    cv2.line(canvas, p1, p2, meas_clr, 1) # 선 굵기 작게(1) 조정
+                
+                # [수정] 수치 표시를 마지막 클릭 지점(p2) 근처로 변경
+                cv2.putText(canvas, f"{val:.3f}mm", (p2[0]+10, p2[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 2)
             
             if self.measure_p1: cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 2)
-            if self.calib_p1 and self.calib_p2: cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 2)
+            if self.calib_p1 and self.calib_p2: cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
             
             self.last_full_canvas = canvas.copy(); res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8); display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
