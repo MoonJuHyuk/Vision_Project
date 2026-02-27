@@ -12,24 +12,23 @@ from PIL import ImageFont, ImageDraw, Image
 class VisionInspector:
     def __init__(self, dxf_path=""):
         self.dxf_path = dxf_path
-        self.cam_index_list = [1, 2, 3, 0, 4, 5] # 탐색 범위를 넓힘
+        self.cam_index_list = [1, 2, 3, 0, 4, 5]
         self.current_cam_idx_ptr = 0
-        self.cap = None
-        self.is_running = True
+        self.cap = self.auto_find_camera()
+        if self.cap is None: sys.exit()
+        self.setup_camera()
         
-        # 첫 카메라 탐색 및 연결
-        if not self.try_connect_camera(self.cam_index_list[0]):
-            self.cap = self.auto_find_camera()
-            
-        if self.cap is None:
-            print("❌ 카메라를 찾을 수 없습니다."); sys.exit()
-            
-        # 상태 및 UI 설정
-        self.is_frozen = False; self.frozen_frame = None; self.last_full_canvas = None
+        self.is_running = True
+        self.is_frozen = False
+        self.frozen_frame = None
+        self.last_full_canvas = None
+        
+        # UI 및 색상 설정
         self.view_w, self.ui_w = 1200, 280
         self.total_w = self.view_w + self.ui_w
         self.clr_bg = (248, 249, 250); self.clr_primary = (54, 116, 217)
         self.clr_pressed = (34, 86, 167); self.clr_text = (33, 37, 41)
+        
         self.color_palette = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 255)]
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
@@ -43,63 +42,53 @@ class VisionInspector:
             ['CALIB', 'CALIB_COLOR'],
             ['SAVE_IMG', 'QUIT']
         ]
+        
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
-        self.dxf_contours, self.dxf_real_width = self.load_dxf(dxf_path)
+        
+        # 데이터 초기화
+        self.dxf_contours = []; self.dxf_real_width = 0
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
-        self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
-        self.angle = 0.0; self.measurements = []; self.measure_p1 = None
+        self.scale = 1.0 # [중요] pixels per mm (초기값)
+        self.angle = 0.0
+        
+        self.measurements = []; self.measure_p1 = None
         self.calib_p1 = None; self.calib_p2 = None; self.fixed_calib_line = None
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
+        
+        if dxf_path: self.load_dxf_action(dxf_path)
 
-    def try_connect_camera(self, idx):
-        """특정 인덱스의 카메라 연결 시도 및 해상도 최적화"""
-        if self.cap: self.cap.release()
-        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-        if not self.cap.isOpened(): return False
-        
-        # 해상도 설정 시도
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        
-        # 카메라가 깨어날 시간 대기
-        time.sleep(1.0) 
-        
-        ret, frame = self.cap.read()
-        if ret and frame is not None:
-            self.cam_h, self.cam_w = frame.shape[:2]
-            self.view_h = int(self.cam_h * (1200 / self.cam_w))
-            print(f"✅ Camera Index {idx} 연결 성공 ({self.cam_w}x{self.cam_h})")
-            return True
-        return False
+    def setup_camera(self):
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        time.sleep(0.5); ret, frame = self.cap.read()
+        if ret: self.cam_h, self.cam_w = frame.shape[:2]; self.view_h = int(self.cam_h * (1200 / self.cam_w))
 
     def auto_find_camera(self):
-        """사용 가능한 모든 포트 자동 탐색"""
         for i in self.cam_index_list:
-            if self.try_connect_camera(i):
-                self.current_cam_idx_ptr = self.cam_index_list.index(i)
-                return self.cap
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                time.sleep(0.5); ret, frame = cap.read()
+                if ret and frame is not None: return cap
+            cap.release()
         return None
 
     def switch_camera(self):
-        """다음 카메라로 순환 전환"""
-        print("🔄 카메라 전환 시도 중...")
-        for _ in range(len(self.cam_index_list)):
-            self.current_cam_idx_ptr = (self.current_cam_idx_ptr + 1) % len(self.cam_index_list)
-            target_idx = self.cam_index_list[self.current_cam_idx_ptr]
-            if self.try_connect_camera(target_idx):
-                self.is_frozen = False
-                return
-        print("⚠️ 사용 가능한 다른 카메라가 없습니다.")
+        self.current_cam_idx_ptr = (self.current_cam_idx_ptr + 1) % len(self.cam_index_list)
+        new_cap = cv2.VideoCapture(self.cam_index_list[self.current_cam_idx_ptr], cv2.CAP_DSHOW)
+        if new_cap.isOpened():
+            self.cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False
 
-    def load_dxf(self, path):
-        if not path or not os.path.exists(path): return [], 0
+    def load_dxf_action(self, path):
+        """도면 로드 시 배율을 강제 초기화하지 않도록 수정"""
+        if not path or not os.path.exists(path): return
         doc = ezdxf.readfile(path); msp = doc.modelspace(); contours, all_pts = [], []
         for e in msp.query('LWPOLYLINE'):
             pts = np.array(e.get_points('xy'), dtype=np.float32); contours.append(pts); all_pts.extend(pts)
-        if not all_pts: return [], 0
+        if not all_pts: return
         all_pts = np.array(all_pts); center = np.mean(all_pts, axis=0)
-        dxf_w = np.max(all_pts[:, 0]) - np.min(all_pts[:, 0])
-        return [c - center for c in contours], dxf_w
+        self.dxf_contours = [c - center for c in contours]
+        self.dxf_real_width = np.max(all_pts[:, 0]) - np.min(all_pts[:, 0])
+        # 이미 캘리브레이션이 되어 있다면 해당 scale 유지, 아니면 임시 설정
+        if self.scale <= 1.1: self.scale = (self.cam_w * 0.5) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
 
     def init_buttons(self):
         btn_h = 28; margin_x = 10; margin_y = 5; start_y = 45
@@ -166,7 +155,7 @@ class VisionInspector:
                     elif m == 'LOAD_DXF':
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                         path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")]); root.destroy()
-                        if path: self.dxf_contours, self.dxf_real_width = self.load_dxf(path); self.scale = (self.cam_w * 0.75) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0; self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
+                        if path: self.load_dxf_action(path) # [수정] 배율 유지 로직 적용
                     elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None
                     elif m == 'QUIT': self.is_running = False
                     else: self.current_mode = m; self.measure_p1 = None
@@ -198,7 +187,9 @@ class VisionInspector:
                 if dist_px > 10:
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root)
-                    if val: self.scale = dist_px / val; self.fixed_calib_line = (self.calib_p1, (rx, ry), val)
+                    if val: 
+                        self.scale = dist_px / val # [중요] 절대 scale 값 설정
+                        self.fixed_calib_line = (self.calib_p1, (rx, ry), val)
                     root.destroy()
                 self.calib_p1 = None; self.calib_p2 = None
             self.is_dragging = False
@@ -208,15 +199,14 @@ class VisionInspector:
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
         while self.is_running:
             if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1: break
-            
             if self.is_frozen: frame = self.frozen_frame.copy()
             else: 
                 ret, frame = self.cap.read()
                 if not ret: continue
-            
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
             dxf_clr = self.color_palette[self.idx_dxf_color]; meas_clr = self.color_palette[self.idx_meas_color]; calib_clr = self.color_palette[self.idx_calib_color]
             
+            # [수정] 도면도 절대 scale을 적용하여 그리기
             for pts in self.dxf_contours:
                 pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
                 cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
