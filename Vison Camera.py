@@ -13,7 +13,6 @@ class VisionInspector:
     def __init__(self, dxf_path=""):
         self.dxf_path = dxf_path
         self.cam_index_list = [1, 2, 3, 0, 4, 5]
-        self.current_cam_idx_ptr = 0
         self.cap = self.auto_find_camera()
         if self.cap is None: sys.exit()
         self.setup_camera()
@@ -31,22 +30,27 @@ class VisionInspector:
         self.idx_dxf_color = 0; self.idx_meas_color = 3; self.idx_calib_color = 2
         
         self.modes_grid = [
-            ['SWITCH_CAM', 'FREEZE_LIVE'],
-            ['LOAD_DXF', 'DXF_COLOR'],
-            ['PAN', 'ZOOM'],
-            ['ROTATE', 'CLEAR'],
-            ['MEAS_P2P', 'MEAS_HV'],
-            ['MEAS_COLOR', 'MEAS_UNDO'],
-            ['CALIB', 'CALIB_COLOR'],
-            ['SAVE_IMG', 'QUIT']
+            ['SWITCH_CAM', 'FREEZE_LIVE'], ['LOAD_DXF', 'DXF_COLOR'],
+            ['PAN', 'ZOOM'], ['ROTATE', 'CLEAR'],
+            ['MEAS_P2P', 'MEAS_HV'], ['MEAS_COLOR', 'MEAS_UNDO'],
+            ['CALIB', 'CALIB_COLOR'], ['SAVE_IMG', 'QUIT']
         ]
         
         self.current_mode = 'PAN'; self.pressed_button = None; self.buttons = {}; self.init_buttons()
         self.dxf_contours = []; self.dxf_real_width = 0
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = 1.0; self.angle = 0.0
-        self.measurements = []; self.measure_p1 = None
-        self.calib_p1 = None; self.calib_p2 = None; self.fixed_calib_line = None
+        
+        # 측정/캘리브 데이터 구조 변경
+        self.measurements = [] # [(p1, p2, val, type, p_text)]
+        self.measure_p1 = None
+        self.measure_p2 = None # 수치 배치 대기용
+        self.measure_temp_val = 0
+        
+        self.calib_p1 = None; self.calib_p2 = None
+        self.calib_temp_data = None # (p1, p2, val)
+        self.fixed_calib_line = None # (p1, p2, val, p_text)
+        
         self.is_dragging = False; self.curr_mx, self.curr_my = 0, 0
         if dxf_path: self.load_dxf_action(dxf_path)
 
@@ -64,11 +68,6 @@ class VisionInspector:
             cap.release()
         return None
 
-    def switch_camera(self):
-        self.current_cam_idx_ptr = (self.current_cam_idx_ptr + 1) % len(self.cam_index_list)
-        new_cap = cv2.VideoCapture(self.cam_index_list[self.current_cam_idx_ptr], cv2.CAP_DSHOW)
-        if new_cap.isOpened(): self.cap.release(); self.cap = new_cap; self.setup_camera(); self.is_frozen = False
-
     def load_dxf_action(self, path):
         if not path or not os.path.exists(path): return
         doc = ezdxf.readfile(path); msp = doc.modelspace(); contours, all_pts = [], []
@@ -81,7 +80,7 @@ class VisionInspector:
         if self.scale <= 1.1: self.scale = (self.cam_w * 0.5) / self.dxf_real_width if self.dxf_real_width > 0 else 1.0
 
     def init_buttons(self):
-        btn_h = 28; margin_x = 10; margin_y = 5; start_y = 45
+        btn_h, margin_x, margin_y, start_y = 28, 10, 5, 45
         col_w = (self.ui_w - 30 - margin_x) // 2
         for r, row in enumerate(self.modes_grid):
             for c, mode in enumerate(row):
@@ -107,12 +106,13 @@ class VisionInspector:
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1); cv2.rectangle(display_img, (x1, y1), (x2, y2), (206, 212, 218), 1)
             display_img = self.draw_text_pretty(display_img, mode.replace('_', ' '), (x1 + 5, y1 + 5), size=10, color=t_clr, bold=active)
         
-        mag_size = 200; mag_margin = 25
+        mag_size, mag_margin = 200, 25
         mag_y1, mag_y2 = self.view_h - mag_size - mag_margin, self.view_h - mag_margin
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
         if self.curr_mx < self.view_w:
-            w_ratio = self.cam_w / self.view_w; rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
+            w_ratio = self.cam_w / self.view_w
+            rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
             roi_s = 30; y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s); x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
             if y2 > y1 and x2 > x1:
                 roi = self.last_full_canvas[y1:y2, x1:x2]; roi_res = cv2.resize(roi, (mag_size, mag_size), interpolation=cv2.INTER_NEAREST)
@@ -132,37 +132,40 @@ class VisionInspector:
                             ret, frame = self.cap.read()
                             if ret: self.frozen_frame = frame.copy(); self.is_frozen = True
                         else: self.is_frozen = False
-                    elif m == 'SWITCH_CAM': self.switch_camera()
                     elif m == 'DXF_COLOR': self.idx_dxf_color = (self.idx_dxf_color + 1) % len(self.color_palette)
                     elif m == 'MEAS_COLOR': self.idx_meas_color = (self.idx_meas_color + 1) % len(self.color_palette)
                     elif m == 'CALIB_COLOR': self.idx_calib_color = (self.idx_calib_color + 1) % len(self.color_palette)
                     elif m == 'MEAS_UNDO':
-                        if self.measure_p1: self.measure_p1 = None
+                        if self.measure_p2: self.measure_p2 = None; self.measure_p1 = None
+                        elif self.measure_p1: self.measure_p1 = None
                         elif self.measurements: self.measurements.pop()
-                    elif m == 'SAVE_IMG':
-                        fn = f'Inspection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
-                        cv2.imwrite(fn, self.last_full_canvas)
-                    elif m == 'LOAD_DXF':
-                        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                        path = filedialog.askopenfilename(filetypes=[("DXF Files", "*.dxf")]); root.destroy()
-                        if path: self.load_dxf_action(path)
-                    elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.calib_p1 = None; self.fixed_calib_line = None
+                    elif m == 'CLEAR': self.measurements = []; self.measure_p1 = None; self.measure_p2 = None; self.fixed_calib_line = None; self.calib_temp_data = None
                     elif m == 'QUIT': self.is_running = False
-                    else: self.current_mode = m; self.measure_p1 = None
+                    else: self.current_mode = m; self.measure_p1 = None; self.measure_p2 = None
                     return
         if event == cv2.EVENT_LBUTTONUP: self.pressed_button = None
 
         w_ratio = self.cam_w / self.view_w; rx, ry = x * w_ratio, y * w_ratio
         if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
-            self.is_dragging = True; self.lmx, self.lmy = x, y
-            if self.current_mode == 'CALIB': self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
-            elif 'MEAS' in self.current_mode:
+            # [신규] 3단계 조작 로직 (수치 위치 지정)
+            if 'MEAS' in self.current_mode:
                 if self.measure_p1 is None: self.measure_p1 = (rx, ry)
-                else:
-                    p1, p2 = np.array(self.measure_p1), np.array([rx, ry]); dist_px = np.linalg.norm(p1 - p2)
-                    if self.current_mode == 'MEAS_HV': dist_px = max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
-                    self.measurements.append((self.measure_p1, (rx, ry), dist_px / self.scale, self.current_mode))
-                    self.measure_p1 = None
+                elif self.measure_p2 is None: 
+                    self.measure_p2 = (rx, ry)
+                    p1 = np.array(self.measure_p1); p2 = np.array(self.measure_p2)
+                    self.measure_temp_val = np.linalg.norm(p1-p2) if self.current_mode == 'MEAS_P2P' else max(abs(p1[0]-p2[0]), abs(p1[1]-p2[1]))
+                else: # 3번째 클릭: 수치 위치 확정
+                    self.measurements.append((self.measure_p1, self.measure_p2, self.measure_temp_val/self.scale, self.current_mode, (rx, ry)))
+                    self.measure_p1 = None; self.measure_p2 = None
+                    
+            elif self.current_mode == 'CALIB':
+                if self.calib_temp_data: # 수치 배치 대기 중이면
+                    p1, p2, val = self.calib_temp_data
+                    self.fixed_calib_line = (p1, p2, val, (rx, ry))
+                    self.calib_temp_data = None
+                else: # 드래그 시작
+                    self.is_dragging = True; self.lmx, self.lmy = x, y
+                    self.calib_p1 = (rx, ry); self.calib_p2 = (rx, ry)
         
         elif event == cv2.EVENT_MOUSEMOVE and self.is_dragging:
             if self.current_mode == 'CALIB': self.calib_p2 = (rx, ry)
@@ -171,6 +174,7 @@ class VisionInspector:
             elif self.current_mode == 'ZOOM': self.scale *= (1 - dy * 0.005)
             elif self.current_mode == 'ROTATE': self.angle += dx * 0.1
             self.lmx, self.lmy = x, y
+            
         elif event == cv2.EVENT_LBUTTONUP:
             if self.is_dragging and self.current_mode == 'CALIB' and self.calib_p1:
                 dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
@@ -179,7 +183,7 @@ class VisionInspector:
                     val = simpledialog.askfloat("Calibration", "실제 길이(mm) 입력:", parent=root)
                     if val: 
                         self.scale = dist_px / val
-                        self.fixed_calib_line = (self.calib_p1, (rx, ry), val)
+                        self.calib_temp_data = (self.calib_p1, (rx, ry), val) # 수치 배치 대기로 전환
                     root.destroy()
                 self.calib_p1 = None; self.calib_p2 = None
             self.is_dragging = False
@@ -194,33 +198,37 @@ class VisionInspector:
                 ret, frame = self.cap.read()
                 if not ret: continue
             canvas = frame.copy(); rad = np.radians(self.angle); rot_m = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
-            dxf_clr = self.color_palette[self.idx_dxf_color]; meas_clr = self.color_palette[self.idx_meas_color]; calib_clr = self.color_palette[self.idx_calib_color]
+            dxf_clr, meas_clr, calib_clr = self.color_palette[self.idx_dxf_color], self.color_palette[self.idx_meas_color], self.color_palette[self.idx_calib_color]
             
             for pts in self.dxf_contours:
-                pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32)
-                cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1) # 두께 1 유지
+                pts_draw = ((pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]).astype(np.int32); cv2.polylines(canvas, [pts_draw], True, dxf_clr, 1)
             
+            # 고정된 데이터 출력
             if self.fixed_calib_line:
-                p1, p2, val = self.fixed_calib_line; p1i, p2i = (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1]))
-                cv2.line(canvas, p1i, p2i, calib_clr, 1) # 선 굵기 작게(1) 조정
-                # [수정] 수치 표시를 마지막 클릭 지점(p2i) 근처로 변경
-                cv2.putText(canvas, f"REF: {val:.1f}mm", (p2i[0]+10, p2i[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
+                p1, p2, val, pt = self.fixed_calib_line
+                cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 1)
+                cv2.putText(canvas, f"REF: {val:.1f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 2)
             
-            for m1, m2, val, m_type in self.measurements:
+            for m1, m2, val, m_type, pt in self.measurements:
                 p1, p2 = (int(m1[0]), int(m1[1])), (int(m2[0]), int(m2[1]))
                 if m_type == 'MEAS_HV':
-                    if abs(p1[0]-p2[0]) > abs(p1[1]-p2[1]): 
-                        cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 1); p2 = (p2[0], p1[1])
-                    else: 
-                        cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 1); p2 = (p1[0], p2[1])
-                else: 
-                    cv2.line(canvas, p1, p2, meas_clr, 1) # 선 굵기 작게(1) 조정
-                
-                # [수정] 수치 표시를 마지막 클릭 지점(p2) 근처로 변경
-                cv2.putText(canvas, f"{val:.3f}mm", (p2[0]+10, p2[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 2)
-            
-            if self.measure_p1: cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 2)
-            if self.calib_p1 and self.calib_p2: cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
+                    if abs(p1[0]-p2[0]) > abs(p1[1]-p2[1]): cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 1); p2 = (p2[0], p1[1])
+                    else: cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 1); p2 = (p1[0], p2[1])
+                else: cv2.line(canvas, p1, p2, meas_clr, 1)
+                cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 2)
+
+            # [수정] 수치 고정 전 '유령 가이드' 출력 로직
+            if self.measure_p2: # 측정 수치 배치 대기 중
+                p1, p2 = (int(self.measure_p1[0]), int(self.measure_p1[1])), (int(self.measure_p2[0]), int(self.measure_p2[1]))
+                cv2.line(canvas, p1, p2, meas_clr, 1)
+                cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.7, meas_clr, 1)
+            elif self.measure_p1: cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 2)
+
+            if self.calib_temp_data: # 캘리브 수치 배치 대기 중
+                p1, p2, val = self.calib_temp_data
+                cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 1)
+                cv2.putText(canvas, f"REF: {val:.1f}mm", (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), cv2.FONT_HERSHEY_SIMPLEX, 0.7, calib_clr, 1)
+            elif self.calib_p1 and self.calib_p2: cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
             
             self.last_full_canvas = canvas.copy(); res_view = cv2.resize(canvas, (self.view_w, self.view_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8); display_img[:, :self.view_w] = res_view; display_img = self.draw_ui(display_img)
