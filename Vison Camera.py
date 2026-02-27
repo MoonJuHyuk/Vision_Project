@@ -34,7 +34,7 @@ class VisionInspector:
             'MEAS_P2P': '직선 측정', 'MEAS_HV': '수평수직 측정',
             'MEAS_COLOR': '측정 색상', 'MEAS_UNDO': '측정 취소',
             'CALIB': '캘리브레이션', 'CALIB_COLOR': '캘리브 색상',
-            'SAVE_IMG': '이미지 저장', 'QUIT': '프로그램 종료'
+            'SAVE_IMG': '이미지 저장', 'QUIT': '종료'
         }
         
         self.modes_grid = [
@@ -103,14 +103,13 @@ class VisionInspector:
             font_btn = ImageFont.truetype("malgunbd.ttf", 10)
         except: font_b = font_btn = ImageFont.load_default()
         
-        draw.text((self.view_w + 20, 10), "VISION 제어 센터", font=font_b, fill=(217, 116, 54))
+        draw.text((self.view_w + 20, 10), "비전 측정 시스템", font=font_b, fill=(217, 116, 54))
         
         for mode, (x1, y1, x2, y2) in self.buttons.items():
             active = (mode == self.current_mode); pressed = (mode == self.pressed_button)
             
-            # 버튼 배경색 결정
+            # [수정] 클릭 상태 대비 강화 로직
             b_clr = self.clr_pressed if pressed else (self.clr_primary if active else (255, 255, 255))
-            # 버튼 글자색 결정 (대비 강화)
             t_clr = (255, 255, 255) if (active or pressed) else self.clr_text
             
             cv2.rectangle(display_img, (x1, y1), (x2, y2), b_clr, -1)
@@ -118,11 +117,10 @@ class VisionInspector:
             
             # PIL로 한글 텍스트 그리기
             label = self.btn_labels.get(mode, mode)
-            draw.text((x1 + 8, y1 + 7), label, font=font_btn, fill=(t_clr[2], t_clr[1], t_clr[0]))
+            draw.text((x1 + 10, y1 + 7), label, font=font_btn, fill=(t_clr[2], t_clr[1], t_clr[0]))
             
         display_img = np.array(img_pil)
         
-        # 돋보기 창
         mag_size, mag_margin = 200, 25; mag_y1, mag_y2 = self.view_h - mag_size - mag_margin, self.view_h - mag_margin
         mag_x1, mag_x2 = self.view_w + (self.ui_w - mag_size)//2, self.view_w + (self.ui_w + mag_size)//2
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), (200, 200, 200), 2)
@@ -158,14 +156,14 @@ class VisionInspector:
                     elif m == 'SAVE_IMG':
                         if self.last_full_canvas is not None:
                             root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                            path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=f'검사결과_{datetime.now().strftime("%H%M%S")}.jpg', parent=root)
+                            path = filedialog.asksaveasfilename(defaultextension=".jpg", initialfile=f'검사결과_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg', parent=root)
                             if path:
                                 try:
                                     res, buffer = cv2.imencode('.jpg', self.last_full_canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
                                     if res:
                                         with open(path, "wb") as f: f.write(buffer.tobytes())
-                                        messagebox.showinfo("완료", "이미지가 성공적으로 저장되었습니다.", parent=root)
-                                except: messagebox.showerror("실패", "저장 중 오류가 발생했습니다.", parent=root)
+                                        messagebox.showinfo("저장 완료", "이미지가 성공적으로 저장되었습니다.", parent=root)
+                                except: messagebox.showerror("저장 실패", "이미지를 저장하는 중 오류가 발생했습니다.", parent=root)
                             root.destroy()
                     elif m == 'LOAD_DXF':
                         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
