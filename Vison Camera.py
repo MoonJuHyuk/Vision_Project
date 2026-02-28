@@ -118,11 +118,14 @@ class VisionInspector:
         # 하단 영역 고정 (확대경 + 상태바)
         self.bottom_area_height = 250
         
-        self.init_buttons()
-        
+        # 중요: 카메라 설정을 먼저 (view_h 정의)
         self.dxf_contours = []
         self.dxf_real_width = 0
         self.setup_camera()
+        
+        # 그 다음 버튼 초기화 (view_h 사용)
+        self.init_buttons()
+        
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = 1.0
         self.angle = 0.0
