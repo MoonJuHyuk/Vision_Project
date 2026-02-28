@@ -114,6 +114,10 @@ class VisionInspector:
         self.pressed_button = None
         self.buttons = {}
         self.section_headers = {}
+        
+        # 하단 영역 고정 (확대경 + 상태바)
+        self.bottom_area_height = 250
+        
         self.init_buttons()
         
         self.dxf_contours = []
@@ -190,25 +194,34 @@ class VisionInspector:
             pass
 
     def init_buttons(self):
-        btn_h = 32
+        btn_h = 30
         margin_x = 8
-        margin_y = 6
-        section_h = 20
-        section_gap = 10
-        start_y = 70
+        margin_y = 5
+        section_h = 18
+        section_gap = 8
+        start_y = 65
         
         # 2열 그리드 계산
         col_w = (self.ui_w - 30 - margin_x) // 2
+        
+        # 버튼이 그려질 수 있는 최대 Y 위치 (하단 영역 제외)
+        max_button_y = self.view_h - self.bottom_area_height - 10
         
         y = start_y
         
         for section in self.button_sections:
             # 섹션 헤더
-            self.section_headers[section['title']] = y
-            y += section_h
+            if y + section_h < max_button_y:
+                self.section_headers[section['title']] = y
+                y += section_h
+            else:
+                break
             
             # 버튼 행들
             for row in section['buttons']:
+                if y + btn_h > max_button_y:
+                    break
+                    
                 for col_idx, btn in enumerate(row):
                     x1 = self.view_w + 15 + col_idx * (col_w + margin_x)
                     x2 = x1 + col_w
@@ -221,7 +234,7 @@ class VisionInspector:
             y += section_gap
 
     def draw_ui(self, display_img):
-        # 1. 배경
+        # 1. 전체 배경
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, self.view_h), self.clr_bg, -1)
         cv2.line(display_img, (self.view_w, 0), (self.view_w, self.view_h), self.clr_border, 2)
         
@@ -253,15 +266,16 @@ class VisionInspector:
             if is_active:
                 cv2.rectangle(display_img, (x1, y1), (x1+4, y2), (76, 255, 153), -1)
         
-        # 4. 하단 상태바 (높이 증가: 240px)
-        status_h = 240
-        status_y = self.view_h - status_h
-        cv2.rectangle(display_img, (self.view_w, status_y), (self.total_w, self.view_h), self.clr_section, -1)
-        cv2.line(display_img, (self.view_w, status_y), (self.total_w, status_y), self.clr_border, 1)
+        # 4. 하단 영역 시작점 계산
+        bottom_start_y = self.view_h - self.bottom_area_height
         
-        # 5. 확대경 (상태바 위쪽에 배치)
-        mag_size = 160
-        mag_y1 = status_y + 15
+        # 5. 하단 영역 배경
+        cv2.rectangle(display_img, (self.view_w, bottom_start_y), (self.total_w, self.view_h), self.clr_section, -1)
+        cv2.line(display_img, (self.view_w, bottom_start_y), (self.total_w, bottom_start_y), self.clr_border, 2)
+        
+        # 6. 확대경 (하단 영역 안쪽 상단)
+        mag_size = 150
+        mag_y1 = bottom_start_y + 20
         mag_y2 = mag_y1 + mag_size
         mag_x1 = self.view_w + (self.ui_w - mag_size)//2
         mag_x2 = mag_x1 + mag_size
@@ -282,13 +296,13 @@ class VisionInspector:
                 cv2.line(display_img, (mag_x1 + mag_size//2, mag_y1), (mag_x1 + mag_size//2, mag_y2), (0, 255, 0), 1)
                 cv2.line(display_img, (mag_x1, mag_y1 + mag_size//2), (mag_x2, mag_y1 + mag_size//2), (0, 255, 0), 1)
         
-        # 6. PIL로 텍스트
+        # 7. PIL로 텍스트
         img_pil = Image.fromarray(display_img)
         draw = ImageDraw.Draw(img_pil)
         
         try:
             font_title = ImageFont.truetype("malgunbd.ttf", 16)
-            font_section = ImageFont.truetype("malgun.ttf", 11)
+            font_section = ImageFont.truetype("malgun.ttf", 10)
             font_btn = ImageFont.truetype("malgun.ttf", 10)
             font_status = ImageFont.truetype("malgun.ttf", 9)
         except:
@@ -300,7 +314,7 @@ class VisionInspector:
         
         # 섹션 헤더
         for title, y_pos in self.section_headers.items():
-            draw.text((self.view_w + 20, y_pos + 3), title, font=font_section, fill=self.clr_text_dim)
+            draw.text((self.view_w + 20, y_pos + 2), title, font=font_section, fill=self.clr_text_dim)
         
         # 버튼 텍스트
         for mode, (x1, y1, x2, y2) in self.buttons.items():
@@ -314,9 +328,9 @@ class VisionInspector:
                 txt_clr = self.clr_text_dim
             
             label = self.btn_labels.get(mode, mode)
-            draw.text((x1 + 10, y1 + 9), label, font=font_btn, fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
+            draw.text((x1 + 10, y1 + 8), label, font=font_btn, fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
         
-        # 상태바 텍스트 (확대경 아래에 배치)
+        # 상태바 텍스트 (확대경 아래)
         status_texts = [
             f"모드: {self.btn_labels.get(self.current_mode, self.current_mode)}",
             f"배율: {self.scale:.2f}x",
@@ -326,13 +340,13 @@ class VisionInspector:
             f"상태: {'정지' if self.is_frozen else '라이브'}"
         ]
         
-        y_pos = mag_y2 + 20
+        y_pos = mag_y2 + 15
         for i, text in enumerate(status_texts):
             if i % 2 == 0:
                 draw.text((self.view_w + 20, y_pos), text, font=font_status, fill=self.clr_text_dim)
             else:
                 draw.text((self.view_w + 180, y_pos), text, font=font_status, fill=self.clr_text_dim)
-                y_pos += 18
+                y_pos += 16
         
         display_img = np.array(img_pil)
         
