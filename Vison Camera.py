@@ -70,7 +70,7 @@ class VisionInspector:
             'QUIT': '종료'
         }
         
-        # 섹션별 버튼 그룹화
+        # 섹션별 버튼 그룹화 (섹션 정보 포함)
         self.button_sections = [
             {
                 'title': '카메라 제어',
@@ -101,6 +101,7 @@ class VisionInspector:
         self.current_mode = 'PAN'
         self.pressed_button = None
         self.buttons = {}
+        self.section_positions = {}  # 섹션 헤더 위치 저장
         self.init_buttons()
         
         self.dxf_contours = []
@@ -177,13 +178,20 @@ class VisionInspector:
             pass
 
     def init_buttons(self):
-        btn_h, margin, start_y = 32, 8, 80
+        btn_h = 32
+        margin = 8
+        start_y = 80
+        section_header_h = 22
+        section_spacing = 8
+        
         y_offset = start_y
         
         for section in self.button_sections:
-            # 섹션별 간격
-            y_offset += 30
+            # 섹션 헤더 위치 저장
+            self.section_positions[section['title']] = y_offset + section_spacing
+            y_offset += section_spacing + section_header_h
             
+            # 각 버튼 위치 계산
             for btn_mode in section['buttons']:
                 x1 = self.view_w + 15
                 x2 = self.total_w - 15
@@ -215,58 +223,54 @@ class VisionInspector:
         draw.text((self.view_w + 20, 12), "VISION MEASUREMENT", font=font_title, fill=(204, 122, 0))
         draw.text((self.view_w + 20, 32), "SYSTEM v2.0", font=font_status, fill=self.clr_text_dim)
         
-        # 섹션별 버튼 그리기
-        y_offset = 80
+        # 섹션 헤더 그리기
+        for section_title, y_pos in self.section_positions.items():
+            draw.text((self.view_w + 20, y_pos), section_title, font=font_section, fill=self.clr_text_dim)
         
-        for section in self.button_sections:
-            # 섹션 헤더
-            y_offset += 8
-            draw.text((self.view_w + 20, y_offset), section['title'], font=font_section, fill=self.clr_text_dim)
-            y_offset += 22
+        # 버튼 그리기
+        for mode, (x1, y1, x2, y2) in self.buttons.items():
+            # 버튼 상태 결정
+            is_active = (mode == self.current_mode)
+            is_hovered = (mode == self.hovered_button)
+            is_pressed = (mode == self.pressed_button)
             
-            for mode in section['buttons']:
-                if mode not in self.buttons:
-                    continue
-                
-                x1, y1, x2, y2 = self.buttons[mode]
-                
-                # 버튼 상태 결정
-                is_active = (mode == self.current_mode)
-                is_hovered = (mode == self.hovered_button)
-                is_pressed = (mode == self.pressed_button)
-                
-                # 버튼 색상 결정
-                if is_pressed:
-                    btn_clr = self.clr_pressed
-                    txt_clr = self.clr_text
-                    border_clr = self.clr_primary
-                elif is_active:
-                    btn_clr = self.clr_active
-                    txt_clr = self.clr_text
-                    border_clr = self.clr_active
-                elif is_hovered:
-                    btn_clr = self.clr_hover
-                    txt_clr = self.clr_text
-                    border_clr = self.clr_hover
-                else:
-                    btn_clr = self.clr_panel
-                    txt_clr = self.clr_text_dim
-                    border_clr = self.clr_border
-                
-                # 버튼 배경
-                cv2.rectangle(display_img, (x1, y1), (x2, y2), btn_clr, -1)
-                # 버튼 테두리
-                cv2.rectangle(display_img, (x1, y1), (x2, y2), border_clr, 1)
-                
-                # 활성 모드 인디케이터
-                if is_active:
-                    cv2.rectangle(display_img, (x1, y1), (x1+4, y2), (76, 255, 153), -1)
-                
-                # 버튼 텍스트
-                label = self.btn_labels.get(mode, mode)
-                draw.text((x1 + 12, y1 + 8), label, font=font_btn, fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
-        
-        display_img = np.array(img_pil)
+            # 버튼 색상 결정
+            if is_pressed:
+                btn_clr = self.clr_pressed
+                txt_clr = self.clr_text
+                border_clr = self.clr_primary
+            elif is_active:
+                btn_clr = self.clr_active
+                txt_clr = self.clr_text
+                border_clr = self.clr_active
+            elif is_hovered:
+                btn_clr = self.clr_hover
+                txt_clr = self.clr_text
+                border_clr = self.clr_hover
+            else:
+                btn_clr = self.clr_panel
+                txt_clr = self.clr_text_dim
+                border_clr = self.clr_border
+            
+            # 버튼 배경
+            cv2.rectangle(display_img, (x1, y1), (x2, y2), btn_clr, -1)
+            # 버튼 테두리
+            cv2.rectangle(display_img, (x1, y1), (x2, y2), border_clr, 1)
+            
+            # 활성 모드 인디케이터
+            if is_active:
+                cv2.rectangle(display_img, (x1, y1), (x1+4, y2), (76, 255, 153), -1)
+            
+            # PIL 다시 변환 (버튼 그린 후)
+            img_pil = Image.fromarray(display_img)
+            draw = ImageDraw.Draw(img_pil)
+            
+            # 버튼 텍스트
+            label = self.btn_labels.get(mode, mode)
+            draw.text((x1 + 12, y1 + 8), label, font=font_btn, fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
+            
+            # 다시 numpy로 변환
+            display_img = np.array(img_pil)
         
         # 하단 상태바
         status_h = 120
