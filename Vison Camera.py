@@ -253,15 +253,15 @@ class VisionInspector:
             if is_active:
                 cv2.rectangle(display_img, (x1, y1), (x1+4, y2), (76, 255, 153), -1)
         
-        # 4. 하단 상태바
-        status_h = 120
+        # 4. 하단 상태바 (높이 증가: 240px)
+        status_h = 240
         status_y = self.view_h - status_h
         cv2.rectangle(display_img, (self.view_w, status_y), (self.total_w, self.view_h), self.clr_section, -1)
         cv2.line(display_img, (self.view_w, status_y), (self.total_w, status_y), self.clr_border, 1)
         
-        # 5. 확대경
-        mag_size = 140
-        mag_y1 = status_y - mag_size - 15
+        # 5. 확대경 (상태바 위쪽에 배치)
+        mag_size = 160
+        mag_y1 = status_y + 15
         mag_y2 = mag_y1 + mag_size
         mag_x1 = self.view_w + (self.ui_w - mag_size)//2
         mag_x2 = mag_x1 + mag_size
@@ -316,7 +316,7 @@ class VisionInspector:
             label = self.btn_labels.get(mode, mode)
             draw.text((x1 + 10, y1 + 9), label, font=font_btn, fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
         
-        # 상태바 텍스트
+        # 상태바 텍스트 (확대경 아래에 배치)
         status_texts = [
             f"모드: {self.btn_labels.get(self.current_mode, self.current_mode)}",
             f"배율: {self.scale:.2f}x",
@@ -326,7 +326,7 @@ class VisionInspector:
             f"상태: {'정지' if self.is_frozen else '라이브'}"
         ]
         
-        y_pos = status_y + 15
+        y_pos = mag_y2 + 20
         for i, text in enumerate(status_texts):
             if i % 2 == 0:
                 draw.text((self.view_w + 20, y_pos), text, font=font_status, fill=self.clr_text_dim)
