@@ -68,13 +68,46 @@ class VisionInspector:
             'QUIT': '종료'
         }
         
+        # 2열 그리드로 섹션 구성
         self.button_sections = [
-            {'title': '카메라 제어', 'buttons': ['SWITCH_CAM', 'FREEZE_LIVE']},
-            {'title': '도면 관리', 'buttons': ['LOAD_DXF', 'DXF_COLOR']},
-            {'title': '뷰 조작', 'buttons': ['PAN', 'ZOOM', 'ROTATE', 'CLEAR']},
-            {'title': '측정 도구', 'buttons': ['MEAS_P2P', 'MEAS_HV', 'MEAS_COLOR', 'MEAS_UNDO']},
-            {'title': '캘리브레이션', 'buttons': ['CALIB', 'CALIB_COLOR']},
-            {'title': '시스템', 'buttons': ['SAVE_IMG', 'QUIT']}
+            {
+                'title': '카메라 제어',
+                'buttons': [
+                    ['SWITCH_CAM', 'FREEZE_LIVE']
+                ]
+            },
+            {
+                'title': '도면 관리',
+                'buttons': [
+                    ['LOAD_DXF', 'DXF_COLOR']
+                ]
+            },
+            {
+                'title': '뷰 조작',
+                'buttons': [
+                    ['PAN', 'ZOOM'],
+                    ['ROTATE', 'CLEAR']
+                ]
+            },
+            {
+                'title': '측정 도구',
+                'buttons': [
+                    ['MEAS_P2P', 'MEAS_HV'],
+                    ['MEAS_COLOR', 'MEAS_UNDO']
+                ]
+            },
+            {
+                'title': '캘리브레이션',
+                'buttons': [
+                    ['CALIB', 'CALIB_COLOR']
+                ]
+            },
+            {
+                'title': '시스템',
+                'buttons': [
+                    ['SAVE_IMG', 'QUIT']
+                ]
+            }
         ]
         
         self.current_mode = 'PAN'
@@ -158,36 +191,44 @@ class VisionInspector:
 
     def init_buttons(self):
         btn_h = 32
-        margin = 8
-        section_h = 22
-        section_gap = 8
-        start_y = 80
+        margin_x = 8
+        margin_y = 6
+        section_h = 20
+        section_gap = 10
+        start_y = 70
+        
+        # 2열 그리드 계산
+        col_w = (self.ui_w - 30 - margin_x) // 2
         
         y = start_y
         
         for section in self.button_sections:
-            # 섹션 헤더 위치
-            self.section_headers[section['title']] = y + section_gap
-            y += section_gap + section_h
+            # 섹션 헤더
+            self.section_headers[section['title']] = y
+            y += section_h
             
-            # 버튼들
-            for btn in section['buttons']:
-                x1 = self.view_w + 15
-                x2 = self.total_w - 15
-                y1 = y
-                y2 = y + btn_h
-                self.buttons[btn] = (x1, y1, x2, y2)
-                y += btn_h + margin
+            # 버튼 행들
+            for row in section['buttons']:
+                for col_idx, btn in enumerate(row):
+                    x1 = self.view_w + 15 + col_idx * (col_w + margin_x)
+                    x2 = x1 + col_w
+                    y1 = y
+                    y2 = y + btn_h
+                    self.buttons[btn] = (x1, y1, x2, y2)
+                
+                y += btn_h + margin_y
+            
+            y += section_gap
 
     def draw_ui(self, display_img):
-        # 1. 배경 그리기 (OpenCV)
+        # 1. 배경
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, self.view_h), self.clr_bg, -1)
         cv2.line(display_img, (self.view_w, 0), (self.view_w, self.view_h), self.clr_border, 2)
         
         # 2. 상단 타이틀 영역
         cv2.rectangle(display_img, (self.view_w, 0), (self.total_w, 50), self.clr_section, -1)
         
-        # 3. 모든 버튼 배경/테두리 그리기 (OpenCV)
+        # 3. 버튼 배경/테두리
         for mode, (x1, y1, x2, y2) in self.buttons.items():
             is_active = (mode == self.current_mode)
             is_hovered = (mode == self.hovered_button)
@@ -212,13 +253,13 @@ class VisionInspector:
             if is_active:
                 cv2.rectangle(display_img, (x1, y1), (x1+4, y2), (76, 255, 153), -1)
         
-        # 4. 하단 상태바 배경
+        # 4. 하단 상태바
         status_h = 120
         status_y = self.view_h - status_h
         cv2.rectangle(display_img, (self.view_w, status_y), (self.total_w, self.view_h), self.clr_section, -1)
         cv2.line(display_img, (self.view_w, status_y), (self.total_w, status_y), self.clr_border, 1)
         
-        # 5. 확대경 배경
+        # 5. 확대경
         mag_size = 140
         mag_y1 = status_y - mag_size - 15
         mag_y2 = mag_y1 + mag_size
@@ -241,25 +282,25 @@ class VisionInspector:
                 cv2.line(display_img, (mag_x1 + mag_size//2, mag_y1), (mag_x1 + mag_size//2, mag_y2), (0, 255, 0), 1)
                 cv2.line(display_img, (mag_x1, mag_y1 + mag_size//2), (mag_x2, mag_y1 + mag_size//2), (0, 255, 0), 1)
         
-        # 6. PIL로 변환해서 모든 텍스트 한번에 그리기
+        # 6. PIL로 텍스트
         img_pil = Image.fromarray(display_img)
         draw = ImageDraw.Draw(img_pil)
         
         try:
             font_title = ImageFont.truetype("malgunbd.ttf", 16)
             font_section = ImageFont.truetype("malgun.ttf", 11)
-            font_btn = ImageFont.truetype("malgun.ttf", 11)
+            font_btn = ImageFont.truetype("malgun.ttf", 10)
             font_status = ImageFont.truetype("malgun.ttf", 9)
         except:
             font_title = font_section = font_btn = font_status = ImageFont.load_default()
         
-        # 타이틀 텍스트
+        # 타이틀
         draw.text((self.view_w + 20, 12), "VISION MEASUREMENT", font=font_title, fill=(204, 122, 0))
         draw.text((self.view_w + 20, 32), "SYSTEM v2.0", font=font_status, fill=self.clr_text_dim)
         
-        # 섹션 헤더 텍스트
+        # 섹션 헤더
         for title, y_pos in self.section_headers.items():
-            draw.text((self.view_w + 20, y_pos), title, font=font_section, fill=self.clr_text_dim)
+            draw.text((self.view_w + 20, y_pos + 3), title, font=font_section, fill=self.clr_text_dim)
         
         # 버튼 텍스트
         for mode, (x1, y1, x2, y2) in self.buttons.items():
@@ -273,7 +314,7 @@ class VisionInspector:
                 txt_clr = self.clr_text_dim
             
             label = self.btn_labels.get(mode, mode)
-            draw.text((x1 + 12, y1 + 8), label, font=font_btn, fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
+            draw.text((x1 + 10, y1 + 9), label, font=font_btn, fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
         
         # 상태바 텍스트
         status_texts = [
@@ -293,7 +334,6 @@ class VisionInspector:
                 draw.text((self.view_w + 180, y_pos), text, font=font_status, fill=self.clr_text_dim)
                 y_pos += 18
         
-        # 7. numpy로 다시 변환
         display_img = np.array(img_pil)
         
         return display_img
