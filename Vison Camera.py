@@ -117,7 +117,7 @@ class VisionInspector:
         
         # 하단 영역 고정 (확대경 + 상태바)
         self.bottom_area_height = 250
-        
+
         # 중요: 카메라 설정을 먼저 (view_h 정의)
         self.dxf_contours = []
         self.dxf_real_width = 0
@@ -129,7 +129,9 @@ class VisionInspector:
         self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
         self.scale = 1.0
         self.angle = 0.0
-        
+
+        self.init_buttons()
+
         self.measurements = []
         self.measure_p1 = None
         self.measure_p2 = None
@@ -148,7 +150,7 @@ class VisionInspector:
         ret, frame = self.cap.read()
         if ret:
             self.cam_h, self.cam_w = frame.shape[:2]
-            self.view_h = int(self.cam_h * (1200 / self.cam_w))
+            self.view_h = max(900, int(self.cam_h * (1200 / self.cam_w)))
 
     def auto_scan_and_connect(self, start_idx):
         for i in range(start_idx, start_idx + 6):
