@@ -150,7 +150,9 @@ class VisionInspector:
         ret, frame = self.cap.read()
         if ret:
             self.cam_h, self.cam_w = frame.shape[:2]
-            self.view_h = max(900, int(self.cam_h * (1200 / self.cam_w)))
+            self.cam_display_h = int(self.cam_h * (self.view_w / self.cam_w))  # 비율 유지 높이
+            self.view_h = max(900, self.cam_display_h)
+            self.cam_y_offset = (self.view_h - self.cam_display_h) // 2       # 상하 중앙 정렬
 
     def auto_scan_and_connect(self, start_idx):
         for i in range(start_idx, start_idx + 6):
@@ -288,9 +290,12 @@ class VisionInspector:
         cv2.rectangle(display_img, (mag_x1-2, mag_y1-2), (mag_x2+2, mag_y2+2), self.clr_border, 2)
         cv2.rectangle(display_img, (mag_x1-1, mag_y1-1), (mag_x2+1, mag_y2+1), self.clr_bg, 1)
         
-        if self.curr_mx < self.view_w and self.last_full_canvas is not None:
+        if (self.curr_mx < self.view_w and
+                self.cam_y_offset <= self.curr_my < self.cam_y_offset + self.cam_display_h and
+                self.last_full_canvas is not None):
             w_ratio = self.cam_w / self.view_w
-            rx, ry = int(self.curr_mx * w_ratio), int(self.curr_my * w_ratio)
+            rx = int(self.curr_mx * w_ratio)
+            ry = int((self.curr_my - self.cam_y_offset) * w_ratio)
             roi_s = 30
             y1, y2 = max(0, ry-roi_s), min(self.cam_h, ry+roi_s)
             x1, x2 = max(0, rx-roi_s), min(self.cam_w, rx+roi_s)
@@ -441,7 +446,8 @@ class VisionInspector:
             self.pressed_button = None
 
         w_ratio = self.cam_w / self.view_w
-        rx, ry = x * w_ratio, y * w_ratio
+        rx = x * w_ratio
+        ry = (y - self.cam_y_offset) * w_ratio
         
         if flags & cv2.EVENT_FLAG_SHIFTKEY:
             if self.measure_p1:
@@ -572,30 +578,34 @@ class VisionInspector:
                 cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
             
+            w_ratio = self.cam_w / self.view_w
             if self.is_dragging and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
-                mx, my = int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))
-                cv2.drawMarker(canvas, (mx, my), (0, 255, 255), 
-                             markerType=cv2.MARKER_CROSS, markerSize=25, thickness=1)
-            
+                mx = int(self.curr_mx * w_ratio)
+                my = int((self.curr_my - self.cam_y_offset) * w_ratio)
+                cv2.drawMarker(canvas, (mx, my), (0, 255, 255),
+                               markerType=cv2.MARKER_CROSS, markerSize=25, thickness=1)
+
             if self.measure_p2:
-                cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm", 
-                           (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
+                cx = int(self.curr_mx * w_ratio)
+                cy = int((self.curr_my - self.cam_y_offset) * w_ratio)
+                cv2.putText(canvas, f"{self.measure_temp_val/self.scale:.3f}mm",
+                            (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
             elif self.measure_p1:
                 cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 1)
-            
+
             if self.calib_temp_data:
-                cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm", 
-                           (int(self.curr_mx*(self.cam_w/self.view_w)), int(self.curr_my*(self.cam_w/self.view_w))), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
+                cx = int(self.curr_mx * w_ratio)
+                cy = int((self.curr_my - self.cam_y_offset) * w_ratio)
+                cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm",
+                            (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
             elif self.calib_p1 and self.calib_p2:
-                cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])), 
-                        (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
-            
+                cv2.line(canvas, (int(self.calib_p1[0]), int(self.calib_p1[1])),
+                         (int(self.calib_p2[0]), int(self.calib_p2[1])), calib_clr, 1)
+
             self.last_full_canvas = canvas.copy()
-            res_view = cv2.resize(canvas, (self.view_w, self.view_h))
+            res_view = cv2.resize(canvas, (self.view_w, self.cam_display_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8)
-            display_img[:, :self.view_w] = res_view
+            display_img[self.cam_y_offset:self.cam_y_offset + self.cam_display_h, :self.view_w] = res_view
             display_img = self.draw_ui(display_img)
             
             cv2.imshow('Vision Inspector', display_img)
