@@ -4,10 +4,19 @@ import ezdxf
 import os
 import sys
 import time
+import threading
+import random
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, simpledialog, messagebox
 from PIL import ImageFont, ImageDraw, Image
+
+try:
+    import serial
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except ImportError:
+    SERIAL_AVAILABLE = False
 
 
 class VisionInspector:
@@ -65,6 +74,8 @@ class VisionInspector:
             'MEAS_UNDO': '측정 취소',
             'CALIB': '캘리브레이션',
             'CALIB_COLOR': '캘리브 색상',
+            'SCALE_CONNECT': '저울 연결',
+            'SCALE_SAVE': '무게 저장',
             'SAVE_IMG': '이미지 저장',
             'QUIT': '종료'
         }
@@ -95,6 +106,10 @@ class VisionInspector:
             {
                 'title': '캘리브레이션',
                 'buttons': [['CALIB', 'CALIB_COLOR']]
+            },
+            {
+                'title': '정밀저울',
+                'buttons': [['SCALE_CONNECT', 'SCALE_SAVE']]
             },
             {
                 'title': '시스템',
@@ -132,8 +147,126 @@ class VisionInspector:
         self.is_dragging = False
         self.curr_mx, self.curr_my = 0, 0
 
+        # 저울 관련 초기화
+        self.scale_weight = None          # 현재 무게값 (g)
+        self.scale_connected = False      # 실제 시리얼 연결 여부
+        self.scale_simulating = True      # 시뮬레이션 모드
+        self.scale_com_port = None
+        self.scale_serial = None
+        self.scale_thread = None
+        self.scale_lock = threading.Lock()
+        self.weight_log = []              # 저장된 무게 기록
+
+        self._start_scale_simulation()
+
         if dxf_path:
             self.load_dxf_action(dxf_path)
+
+    # ──────────────────────────────────────────────
+    # 저울 (Scale)
+    # ──────────────────────────────────────────────
+    def _start_scale_simulation(self):
+        """시뮬레이션 모드: 가상 무게값을 주기적으로 생성"""
+        def _sim_loop():
+            base = 12.34
+            while self.scale_simulating:
+                noise = random.uniform(-0.05, 0.05)
+                with self.scale_lock:
+                    self.scale_weight = round(base + noise, 2)
+                time.sleep(0.5)
+
+        t = threading.Thread(target=_sim_loop, daemon=True)
+        t.start()
+        self.scale_thread = t
+
+    def connect_scale(self, port, baud=9600):
+        """실제 RS-232 저울 연결 (pyserial 필요)"""
+        if not SERIAL_AVAILABLE:
+            messagebox.showerror("오류", "pyserial이 설치되지 않았습니다.\n\npip install pyserial")
+            return False
+        try:
+            ser = serial.Serial(port, baudrate=baud, bytesize=8,
+                                parity='N', stopbits=1, timeout=1)
+            self.scale_serial = ser
+            self.scale_com_port = port
+            self.scale_connected = True
+            self.scale_simulating = False
+
+            def _read_loop():
+                buf = ""
+                while self.scale_connected:
+                    try:
+                        ch = ser.read(1).decode('ascii', errors='ignore')
+                        if ch in ('\r', '\n'):
+                            val = self._parse_weight(buf.strip())
+                            if val is not None:
+                                with self.scale_lock:
+                                    self.scale_weight = val
+                            buf = ""
+                        else:
+                            buf += ch
+                    except Exception:
+                        break
+
+            t = threading.Thread(target=_read_loop, daemon=True)
+            t.start()
+            self.scale_thread = t
+            return True
+        except Exception as ex:
+            messagebox.showerror("저울 연결 실패", str(ex))
+            return False
+
+    def disconnect_scale(self):
+        self.scale_connected = False
+        if self.scale_serial:
+            try:
+                self.scale_serial.close()
+            except Exception:
+                pass
+            self.scale_serial = None
+        self.scale_simulating = True
+        self._start_scale_simulation()
+
+    @staticmethod
+    def _parse_weight(raw):
+        """저울 출력 문자열에서 숫자만 추출 (예: '  12.34 g' → 12.34)"""
+        import re
+        m = re.search(r'[\d]+\.[\d]+', raw)
+        if m:
+            return float(m.group())
+        m = re.search(r'[\d]+', raw)
+        if m:
+            return float(m.group())
+        return None
+
+    def save_weight(self):
+        """현재 무게를 로그에 저장하고 CSV 파일에 기록"""
+        with self.scale_lock:
+            w = self.scale_weight
+        if w is None:
+            messagebox.showwarning("저울", "수신된 무게값이 없습니다.")
+            return
+
+        meas_count = len(self.measurements)
+        entry = {
+            'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'weight_g': w,
+            'measurements': meas_count,
+            'source': '시뮬레이션' if self.scale_simulating else self.scale_com_port
+        }
+        self.weight_log.append(entry)
+
+        # CSV 저장 (프로젝트 폴더에 자동 기록)
+        csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weight_log.csv')
+        write_header = not os.path.exists(csv_path)
+        try:
+            with open(csv_path, 'a', encoding='utf-8-sig') as f:
+                if write_header:
+                    f.write("시간,무게(g),측정개수,출처\n")
+                f.write(f"{entry['time']},{entry['weight_g']},{entry['measurements']},{entry['source']}\n")
+            messagebox.showinfo("무게 저장", f"저장 완료\n무게: {w:.2f} g\n파일: weight_log.csv")
+        except Exception as ex:
+            messagebox.showerror("저장 실패", str(ex))
 
     # ──────────────────────────────────────────────
     # 카메라
@@ -444,11 +577,14 @@ class VisionInspector:
             is_active  = (mode == self.current_mode)
             is_hovered = (mode == self.hovered_button)
             is_pressed = (mode == self.pressed_button)
-            txt_clr = self.clr_text if (is_pressed or is_active or is_hovered) else self.clr_text_dim
+            if is_pressed or is_active or is_hovered:
+                txt_fill = (241, 241, 241)
+            else:
+                txt_fill = (200, 200, 200)
             label = self.btn_labels.get(mode, mode)
-            draw.text((x1 + 10, y1 + 8), label, font=font_btn,
-                      fill=(txt_clr[2], txt_clr[1], txt_clr[0]))
+            draw.text((x1 + 8, y1 + 8), label, font=font_btn, fill=txt_fill)
 
+        # ── 상태 텍스트 ───────────────────────────
         status_texts = [
             f"모드: {self.btn_labels.get(self.current_mode, self.current_mode)}",
             f"배율: {self.scale:.2f}x",
@@ -457,6 +593,7 @@ class VisionInspector:
             f"카메라: {self.current_cam_idx}",
             f"상태: {'정지' if self.is_frozen else '라이브'}",
             f"도형: {len(self.dxf_contours)}개",
+            f"저장: {len(self.weight_log)}건",
         ]
         y_pos = mag_y2 + 15
         for i, text in enumerate(status_texts):
@@ -466,6 +603,58 @@ class VisionInspector:
                 y_pos += 16
 
         return np.array(img_pil)
+
+    def draw_weight_overlay(self, canvas):
+        """카메라 영상 우하단에 무게값 오버레이 (저장 이미지에도 포함됨)"""
+        with self.scale_lock:
+            w_val = self.scale_weight
+
+        weight_str = f"{w_val:.2f} g" if w_val is not None else "-- g"
+
+        if self.scale_connected:
+            border_rgb = (0, 200, 100)
+            tag = self.scale_com_port or "COM"
+        elif self.scale_simulating:
+            border_rgb = (255, 180, 0)
+            tag = "SIM"
+        else:
+            border_rgb = (120, 120, 120)
+            tag = "---"
+
+        # 박스 크기·위치 (카메라 원본 해상도 기준)
+        box_w, box_h = 220, 70
+        margin = 20
+        bx1 = canvas.shape[1] - box_w - margin
+        by1 = canvas.shape[0] - box_h - margin
+        bx2 = bx1 + box_w
+        by2 = by1 + box_h
+
+        # 반투명 배경 (알파 블렌딩)
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.65, canvas, 0.35, 0, canvas)
+
+        # 테두리
+        b = border_rgb
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), (b[2], b[1], b[0]), 2)
+
+        # PIL로 한글 텍스트
+        img_pil = Image.fromarray(canvas)
+        draw = ImageDraw.Draw(img_pil)
+        try:
+            font_large = ImageFont.truetype("malgunbd.ttf", 26)
+            font_small = ImageFont.truetype("malgun.ttf",   11)
+        except Exception:
+            font_large = font_small = ImageFont.load_default()
+
+        draw.text((bx1 + 10, by1 + 6),  "정밀저울",  font=font_small, fill=(180, 180, 180))
+        draw.text((bx2 - 40, by1 + 6),  tag,         font=font_small, fill=border_rgb)
+        draw.text((bx1 + 10, by1 + 24), weight_str,  font=font_large, fill=(255, 220, 60))
+        draw.text((bx1 + 10, by1 + 54), f"저장 {len(self.weight_log)}건",
+                  font=font_small, fill=(140, 140, 140))
+
+        canvas[:] = np.array(img_pil)
+        return canvas
 
     # ──────────────────────────────────────────────
     # 마우스
@@ -643,6 +832,41 @@ class VisionInspector:
             self.fixed_calib_line = None
             self.calib_temp_data = None
 
+        elif m == 'SCALE_CONNECT':
+            if self.scale_connected:
+                self.disconnect_scale()
+                messagebox.showinfo("저울", "저울 연결을 해제했습니다.")
+            else:
+                if not SERIAL_AVAILABLE:
+                    messagebox.showinfo(
+                        "저울 연결",
+                        "현재 시뮬레이션 모드입니다.\n\n"
+                        "실제 저울 연결 방법:\n"
+                        "1. pip install pyserial\n"
+                        "2. 저울 RS-232 → USB 변환 케이블 연결\n"
+                        "3. 장치관리자에서 COM 포트 확인\n"
+                        "4. 이 버튼을 다시 클릭"
+                    )
+                else:
+                    ports = [p.device for p in serial.tools.list_ports.comports()]
+                    if not ports:
+                        messagebox.showwarning("저울", "연결된 COM 포트가 없습니다.")
+                        return
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    port = simpledialog.askstring(
+                        "저울 연결",
+                        f"COM 포트를 입력하세요:\n사용 가능: {', '.join(ports)}",
+                        parent=root
+                    )
+                    root.destroy()
+                    if port:
+                        self.connect_scale(port.strip().upper())
+
+        elif m == 'SCALE_SAVE':
+            self.save_weight()
+
         elif m == 'QUIT':
             self.is_running = False
 
@@ -739,6 +963,9 @@ class VisionInspector:
                          (int(self.calib_p1[0]), int(self.calib_p1[1])),
                          (int(self.calib_p2[0]), int(self.calib_p2[1])),
                          calib_clr, 1)
+
+            # ── 무게 오버레이 (저장 이미지에도 포함) ──
+            canvas = self.draw_weight_overlay(canvas)
 
             # ── 화면 출력 ─────────────────────────
             self.last_full_canvas = canvas.copy()
