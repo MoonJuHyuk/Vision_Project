@@ -148,7 +148,8 @@ class VisionInspector:
         self.fixed_calib_line = None
         self.is_dragging = False
         self.curr_mx, self.curr_my = 0, 0
-        self.cross_pos = None  # (x, y) 카메라 좌표계
+        self.cross_pos = None   # (x, y) 카메라 좌표계
+        self.cross_angle = 0.0  # 십자선 회전 각도 (도)
 
         # 저울 관련 초기화
         self.scale_weight = None          # 현재 무게값 (g)
@@ -615,23 +616,35 @@ class VisionInspector:
             self.cross_pos = (canvas.shape[1] // 2, canvas.shape[0] // 2)
         cx, cy = int(self.cross_pos[0]), int(self.cross_pos[1])
         h, w = canvas.shape[:2]
+        L = max(w, h)
 
-        # 전체 폭/높이 십자선
-        cv2.line(canvas, (0, cy), (w, cy), (0, 255, 255), 1)
-        cv2.line(canvas, (cx, 0), (cx, h), (0, 255, 255), 1)
+        rad = np.radians(self.cross_angle)
+        dx1, dy1 = np.cos(rad), np.sin(rad)   # 가로축 방향
+        dx2, dy2 = -np.sin(rad), np.cos(rad)  # 세로축 방향
+
+        # 회전된 십자선 (중심에서 사방으로 연장)
+        cv2.line(canvas,
+                 (int(cx - dx1 * L), int(cy - dy1 * L)),
+                 (int(cx + dx1 * L), int(cy + dy1 * L)),
+                 (0, 255, 255), 1)
+        cv2.line(canvas,
+                 (int(cx - dx2 * L), int(cy - dy2 * L)),
+                 (int(cx + dx2 * L), int(cy + dy2 * L)),
+                 (0, 255, 255), 1)
 
         # 중심 원
         cv2.circle(canvas, (cx, cy), 12, (0, 255, 255), 1)
         cv2.circle(canvas, (cx, cy), 2,  (0, 255, 255), -1)
 
-        # 좌표 표시
+        # 각도·좌표 표시
         img_pil = Image.fromarray(canvas)
         draw = ImageDraw.Draw(img_pil)
         try:
             font = ImageFont.truetype("malgun.ttf", 10)
         except Exception:
             font = ImageFont.load_default()
-        draw.text((cx + 16, cy - 18), f"({cx}, {cy})", font=font, fill=(0, 255, 255))
+        draw.text((cx + 16, cy - 28), f"({cx}, {cy})",       font=font, fill=(0, 255, 255))
+        draw.text((cx + 16, cy - 14), f"{self.cross_angle:.1f}°", font=font, fill=(0, 255, 255))
         canvas[:] = np.array(img_pil)
         return canvas
 
@@ -725,6 +738,13 @@ class VisionInspector:
                     ry = self.calib_p1[1]
                 else:
                     rx = self.calib_p1[0]
+
+        if event == cv2.EVENT_MOUSEWHEEL and self.current_mode == 'CROSS':
+            step = 1.0 if (flags > 0) else -1.0
+            if flags & cv2.EVENT_FLAG_SHIFTKEY:
+                step *= 0.1   # Shift 누르면 0.1° 단위
+            self.cross_angle = (self.cross_angle + step) % 360
+            return
 
         if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
             if self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
