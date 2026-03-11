@@ -67,6 +67,7 @@ class VisionInspector:
             'PAN': '이동 (PAN)',
             'ZOOM': '확대 / 축소',
             'ROTATE': '회전 (Angle)',
+            'CROSS': '십자선',
             'CLEAR': '전체 삭제',
             'MEAS_P2P': '직선 측정',
             'MEAS_HV': '수평수직 측정',
@@ -93,7 +94,8 @@ class VisionInspector:
                 'title': '뷰 조작',
                 'buttons': [
                     ['PAN', 'ZOOM'],
-                    ['ROTATE', 'CLEAR']
+                    ['ROTATE', 'CROSS'],
+                    ['CLEAR']
                 ]
             },
             {
@@ -146,6 +148,7 @@ class VisionInspector:
         self.fixed_calib_line = None
         self.is_dragging = False
         self.curr_mx, self.curr_my = 0, 0
+        self.cross_pos = None  # (x, y) 카메라 좌표계
 
         # 저울 관련 초기화
         self.scale_weight = None          # 현재 무게값 (g)
@@ -604,6 +607,34 @@ class VisionInspector:
 
         return np.array(img_pil)
 
+    def draw_crosshair(self, canvas):
+        """십자선 오버레이 - CROSS 모드일 때 캔버스에 그림"""
+        if self.current_mode != 'CROSS':
+            return canvas
+        if self.cross_pos is None:
+            self.cross_pos = (canvas.shape[1] // 2, canvas.shape[0] // 2)
+        cx, cy = int(self.cross_pos[0]), int(self.cross_pos[1])
+        h, w = canvas.shape[:2]
+
+        # 전체 폭/높이 십자선
+        cv2.line(canvas, (0, cy), (w, cy), (0, 255, 255), 1)
+        cv2.line(canvas, (cx, 0), (cx, h), (0, 255, 255), 1)
+
+        # 중심 원
+        cv2.circle(canvas, (cx, cy), 12, (0, 255, 255), 1)
+        cv2.circle(canvas, (cx, cy), 2,  (0, 255, 255), -1)
+
+        # 좌표 표시
+        img_pil = Image.fromarray(canvas)
+        draw = ImageDraw.Draw(img_pil)
+        try:
+            font = ImageFont.truetype("malgun.ttf", 10)
+        except Exception:
+            font = ImageFont.load_default()
+        draw.text((cx + 16, cy - 18), f"({cx}, {cy})", font=font, fill=(0, 255, 255))
+        canvas[:] = np.array(img_pil)
+        return canvas
+
     def draw_weight_overlay(self, canvas):
         """카메라 영상 우하단에 무게값 오버레이 (저장 이미지에도 포함됨)"""
         with self.scale_lock:
@@ -700,6 +731,11 @@ class VisionInspector:
                 self.is_dragging = True
                 self.lmx, self.lmy = x, y
                 return
+            if self.current_mode == 'CROSS':
+                self.cross_pos = (rx, ry)
+                self.is_dragging = True
+                self.lmx, self.lmy = x, y
+                return
 
             if 'MEAS' in self.current_mode:
                 if self.measure_p1 is None:
@@ -732,7 +768,10 @@ class VisionInspector:
                     self.calib_p2 = (rx, ry)
 
         elif event == cv2.EVENT_MOUSEMOVE and self.is_dragging:
-            if self.current_mode == 'CALIB':
+            if self.current_mode == 'CROSS':
+                self.cross_pos = (rx, ry)
+                self.lmx, self.lmy = x, y
+            elif self.current_mode == 'CALIB':
                 self.calib_p2 = (rx, ry)
             else:
                 dx = (x - self.lmx) * w_ratio
@@ -963,6 +1002,9 @@ class VisionInspector:
                          (int(self.calib_p1[0]), int(self.calib_p1[1])),
                          (int(self.calib_p2[0]), int(self.calib_p2[1])),
                          calib_clr, 1)
+
+            # ── 십자선 오버레이 ────────────────────
+            canvas = self.draw_crosshair(canvas)
 
             # ── 무게 오버레이 (저장 이미지에도 포함) ──
             canvas = self.draw_weight_overlay(canvas)
