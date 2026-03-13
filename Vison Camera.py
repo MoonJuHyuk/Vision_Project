@@ -134,7 +134,7 @@ class VisionInspector:
         # 버튼 초기화
         self.init_buttons()
 
-        self.offset_x, self.offset_y = self.cam_w // 2, self.cam_h // 2
+        self.offset_x, self.offset_y = 0, 0  # 캔버스 중심 기준 pan 델타
         self.scale = 1.0
         self.angle = 0.0
 
@@ -276,12 +276,19 @@ class VisionInspector:
     # 카메라
     # ──────────────────────────────────────────────
     def setup_camera(self):
-        ret, frame = self.cap.read()
-        if ret:
-            self.cam_h, self.cam_w = frame.shape[:2]
-            self.cam_display_h = int(self.cam_h * (self.view_w / self.cam_w))
-            self.view_h = max(900, self.cam_display_h)
-            self.cam_y_offset = (self.view_h - self.cam_display_h) // 2
+        # 안정된 해상도를 얻기 위해 여러 프레임 읽기
+        w, h = 0, 0
+        for _ in range(10):
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                h, w = frame.shape[:2]
+        if w == 0 or h == 0:
+            w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.cam_w, self.cam_h = w, h
+        self.cam_display_h = int(self.cam_h * (self.view_w / self.cam_w))
+        self.view_h = max(900, self.cam_display_h)
+        self.cam_y_offset = (self.view_h - self.cam_display_h) // 2
 
     def auto_scan_and_connect(self, start_idx):
         for i in range(start_idx, start_idx + 6):
@@ -442,11 +449,13 @@ class VisionInspector:
             all_pts = np.array(all_pts, dtype=np.float32)
             center = np.mean(all_pts, axis=0)
 
-            self.dxf_contours = [(ctype, pts - center) for ctype, pts in contours]
+            # AutoCAD Y축(위=+) → 화면 Y축(아래=+) 변환을 위해 Y 반전
+            self.dxf_contours = [(ctype, (pts - center) * [1, -1]) for ctype, pts in contours]
             self.dxf_real_width = (np.max(all_pts[:, 0]) - np.min(all_pts[:, 0]))
 
             if self.scale <= 1.1 and self.dxf_real_width > 0:
-                self.scale = (self.cam_w * 0.5) / self.dxf_real_width
+                ref_w = self.cam_w if 0 < self.cam_w <= 1920 else self.view_w
+                self.scale = (ref_w * 0.4) / self.dxf_real_width
 
             # 로드 성공 메시지 (엔티티 수 표시)
             counts = {}
@@ -952,6 +961,7 @@ class VisionInspector:
                     continue
 
             canvas = frame.copy()
+
             rad = np.radians(self.angle)
             rot_m = np.array([
                 [ np.cos(rad), -np.sin(rad)],
@@ -962,11 +972,14 @@ class VisionInspector:
             meas_clr  = self.color_palette[self.idx_meas_color]
             calib_clr = self.color_palette[self.idx_calib_color]
 
-            # ── DXF 렌더링 (ctype 구분) ──────────
+            # ── DXF 렌더링 ──────────────────────
+            cx = canvas.shape[1] // 2 + self.offset_x
+            cy = canvas.shape[0] // 2 + self.offset_y
+
             for ctype, pts in self.dxf_contours:
                 pts_draw = (
-                    (pts @ rot_m.T) * self.scale + [self.offset_x, self.offset_y]
-                ).astype(np.int32)
+                    (pts @ rot_m.T) * self.scale + [cx, cy]
+                ).astype(np.int32).reshape(-1, 1, 2)
                 closed = (ctype == 'poly')
                 cv2.polylines(canvas, [pts_draw], closed, dxf_clr, 1)
 
