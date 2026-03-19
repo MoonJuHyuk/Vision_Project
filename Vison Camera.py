@@ -56,6 +56,7 @@ class VisionInspector:
         self.idx_dxf_color = 0
         self.idx_meas_color = 3
         self.idx_calib_color = 1
+        self.idx_cross_color = 3   # 기본 cyan
 
         self.hovered_button = None
 
@@ -68,6 +69,8 @@ class VisionInspector:
             'ZOOM': '확대 / 축소',
             'ROTATE': '회전 (Angle)',
             'CROSS': '십자선',
+            'CROSS_COLOR': '십자선 색상',
+            'CROSS_UNDO': '십자선 취소',
             'CLEAR': '전체 삭제',
             'MEAS_P2P': '직선 측정',
             'MEAS_HV': '수평수직 측정',
@@ -95,6 +98,7 @@ class VisionInspector:
                 'buttons': [
                     ['PAN', 'ZOOM'],
                     ['ROTATE', 'CROSS'],
+                    ['CROSS_COLOR', 'CROSS_UNDO'],
                     ['CLEAR']
                 ]
             },
@@ -148,8 +152,9 @@ class VisionInspector:
         self.fixed_calib_line = None
         self.is_dragging = False
         self.curr_mx, self.curr_my = 0, 0
-        self.cross_pos = None   # (x, y) 카메라 좌표계
-        self.cross_angle = 0.0  # 십자선 회전 각도 (도)
+        self.cross_preview_pos = None  # 마우스 미리보기 위치 (x, y)
+        self.cross_angle = 0.0         # 십자선 회전 각도 (도)
+        self.crosshairs = []           # 배치된 십자선 리스트: [(x, y, angle), ...]
 
         # 저울 관련 초기화
         self.scale_weight = None          # 현재 무게값 (g)
@@ -603,6 +608,7 @@ class VisionInspector:
             f"배율: {self.scale:.2f}x",
             f"회전: {self.angle:.1f}°",
             f"측정: {len(self.measurements)}개",
+            f"십자선: {len(self.crosshairs)}개",
             f"카메라: {self.current_cam_idx}",
             f"상태: {'정지' if self.is_frozen else '라이브'}",
             f"도형: {len(self.dxf_contours)}개",
@@ -618,43 +624,46 @@ class VisionInspector:
         return np.array(img_pil)
 
     def draw_crosshair(self, canvas):
-        """십자선 오버레이 - CROSS 모드일 때 캔버스에 그림"""
-        if self.current_mode != 'CROSS':
-            return canvas
-        if self.cross_pos is None:
-            self.cross_pos = (canvas.shape[1] // 2, canvas.shape[0] // 2)
-        cx, cy = int(self.cross_pos[0]), int(self.cross_pos[1])
-        h, w = canvas.shape[:2]
-        L = max(w, h)
+        """십자선 오버레이 - 배치된 십자선 + CROSS 모드 미리보기"""
+        # 수평 13mm, 수직 5mm (self.scale = px/mm)
+        H_ARM = 6.5 * self.scale   # 수평 반길이 (px)
+        V_ARM = 2.5 * self.scale   # 수직 반길이 (px)
 
-        rad = np.radians(self.cross_angle)
-        dx1, dy1 = np.cos(rad), np.sin(rad)   # 가로축 방향
-        dx2, dy2 = -np.sin(rad), np.cos(rad)  # 세로축 방향
+        def _draw_one(img, cx, cy, angle_deg, color, label=None):
+            rad = np.radians(angle_deg)
+            hx, hy = np.cos(rad), np.sin(rad)    # 수평축 단위벡터
+            vx, vy = -np.sin(rad), np.cos(rad)   # 수직축 단위벡터
+            # 수평선 (13mm)
+            cv2.line(img,
+                     (int(cx - hx * H_ARM), int(cy - hy * H_ARM)),
+                     (int(cx + hx * H_ARM), int(cy + hy * H_ARM)),
+                     color, 1)
+            # 수직선 (5mm)
+            cv2.line(img,
+                     (int(cx - vx * V_ARM), int(cy - vy * V_ARM)),
+                     (int(cx + vx * V_ARM), int(cy + vy * V_ARM)),
+                     color, 1)
+            # 중심점
+            cv2.circle(img, (int(cx), int(cy)), 2, color, -1)
+            if label is not None:
+                cv2.putText(img, label,
+                            (int(cx + hx * H_ARM) + 4, int(cy + hy * H_ARM) - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        # 회전된 십자선 (중심에서 사방으로 연장)
-        cv2.line(canvas,
-                 (int(cx - dx1 * L), int(cy - dy1 * L)),
-                 (int(cx + dx1 * L), int(cy + dy1 * L)),
-                 (0, 255, 255), 1)
-        cv2.line(canvas,
-                 (int(cx - dx2 * L), int(cy - dy2 * L)),
-                 (int(cx + dx2 * L), int(cy + dy2 * L)),
-                 (0, 255, 255), 1)
+        cross_clr = self.color_palette[self.idx_cross_color]
+        # 미리보기용 어두운 색
+        preview_clr = tuple(int(c * 0.6) for c in cross_clr)
 
-        # 중심 원
-        cv2.circle(canvas, (cx, cy), 12, (0, 255, 255), 1)
-        cv2.circle(canvas, (cx, cy), 2,  (0, 255, 255), -1)
+        # ── 배치된 십자선들 ──
+        for i, (px, py, pangle) in enumerate(self.crosshairs):
+            _draw_one(canvas, px, py, pangle, cross_clr, label=f"#{i+1}")
 
-        # 각도·좌표 표시
-        img_pil = Image.fromarray(canvas)
-        draw = ImageDraw.Draw(img_pil)
-        try:
-            font = ImageFont.truetype("malgun.ttf", 10)
-        except Exception:
-            font = ImageFont.load_default()
-        draw.text((cx + 16, cy - 28), f"({cx}, {cy})",       font=font, fill=(0, 255, 255))
-        draw.text((cx + 16, cy - 14), f"{self.cross_angle:.1f}°", font=font, fill=(0, 255, 255))
-        canvas[:] = np.array(img_pil)
+        # ── 미리보기 (CROSS 모드일 때만) ──
+        if self.current_mode == 'CROSS' and self.cross_preview_pos is not None:
+            px, py = self.cross_preview_pos
+            _draw_one(canvas, px, py, self.cross_angle, preview_clr,
+                      label=f"{self.cross_angle:.1f}°")
+
         return canvas
 
     def draw_weight_overlay(self, canvas):
@@ -761,9 +770,8 @@ class VisionInspector:
                 self.lmx, self.lmy = x, y
                 return
             if self.current_mode == 'CROSS':
-                self.cross_pos = (rx, ry)
-                self.is_dragging = True
-                self.lmx, self.lmy = x, y
+                # 클릭 위치에 십자선 스탬프 배치
+                self.crosshairs.append((rx, ry, self.cross_angle))
                 return
 
             if 'MEAS' in self.current_mode:
@@ -796,11 +804,12 @@ class VisionInspector:
                     self.calib_p1 = (rx, ry)
                     self.calib_p2 = (rx, ry)
 
-        elif event == cv2.EVENT_MOUSEMOVE and self.is_dragging:
-            if self.current_mode == 'CROSS':
-                self.cross_pos = (rx, ry)
-                self.lmx, self.lmy = x, y
-            elif self.current_mode == 'CALIB':
+        # CROSS 모드: 미리보기 위치 항상 갱신
+        if self.current_mode == 'CROSS' and x <= self.view_w:
+            self.cross_preview_pos = (rx, ry)
+
+        if event == cv2.EVENT_MOUSEMOVE and self.is_dragging:
+            if self.current_mode == 'CALIB':
                 self.calib_p2 = (rx, ry)
             else:
                 dx = (x - self.lmx) * w_ratio
@@ -815,7 +824,7 @@ class VisionInspector:
                     self.angle += (x - self.lmx) * 0.2
                 self.lmx, self.lmy = x, y
 
-        elif event == cv2.EVENT_LBUTTONUP:
+        if event == cv2.EVENT_LBUTTONUP:
             if self.is_dragging and self.current_mode == 'CALIB' and self.calib_p1:
                 dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
                 if dist_px > 10:
@@ -852,6 +861,13 @@ class VisionInspector:
 
         elif m == 'CALIB_COLOR':
             self.idx_calib_color = (self.idx_calib_color + 1) % len(self.color_palette)
+
+        elif m == 'CROSS_COLOR':
+            self.idx_cross_color = (self.idx_cross_color + 1) % len(self.color_palette)
+
+        elif m == 'CROSS_UNDO':
+            if self.crosshairs:
+                self.crosshairs.pop()
 
         elif m == 'MEAS_UNDO':
             if self.measure_p2:
@@ -897,6 +913,7 @@ class VisionInspector:
             self.measurements = []
             self.measure_p1 = None
             self.measure_p2 = None
+            self.crosshairs = []
             self.fixed_calib_line = None
             self.calib_temp_data = None
 
@@ -942,6 +959,8 @@ class VisionInspector:
             self.current_mode = m
             self.measure_p1 = None
             self.measure_p2 = None
+            if m != 'CROSS':
+                self.cross_preview_pos = None
 
     # ──────────────────────────────────────────────
     # 메인 루프
