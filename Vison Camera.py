@@ -334,6 +334,36 @@ class VisionInspector:
         return None
 
     def switch_camera(self):
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+
+        dialog = tk.Toplevel(root)
+        dialog.title("카메라 선택")
+        dialog.geometry("300x280")
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+
+        tk.Label(dialog, text="연결할 카메라를 선택하세요:").pack(pady=(12, 5))
+        camera_list = tk.Listbox(dialog, height=8, exportselection=False)
+        for idx in range(6):
+            label = "현재 카메라" if idx == self.current_cam_idx else "카메라"
+            camera_list.insert(tk.END, f"{label} {idx}")
+        camera_list.selection_set(self.current_cam_idx)
+        camera_list.pack(fill=tk.BOTH, expand=True, padx=15)
+
+        def select_camera():
+            selection = camera_list.curselection()
+            if selection:
+                self._start_camera_switch(selection[0])
+            dialog.destroy()
+            root.destroy()
+
+        tk.Button(dialog, text="연결", command=select_camera).pack(pady=12)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: (dialog.destroy(), root.destroy()))
+        root.mainloop()
+
+    def _start_camera_switch(self, target_idx):
         with self.camera_lock:
             if self.camera_switching:
                 return
@@ -346,9 +376,8 @@ class VisionInspector:
             old_cap.release()
 
         def _find_camera():
-            next_idx = (old_idx + 1) % 6
-            new_cap = self._open_camera(next_idx)
-            selected_idx = next_idx
+            new_cap = self._open_camera(target_idx)
+            selected_idx = target_idx
             if new_cap is None:
                 new_cap = self._open_camera(old_idx)
                 selected_idx = old_idx if new_cap is not None else None
