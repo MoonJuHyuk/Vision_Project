@@ -26,6 +26,10 @@ class VisionInspector:
         self.cap = self.auto_scan_and_connect(0)
         if self.cap is None:
             sys.exit()
+        self.camera_switching = False
+        self.pending_camera = None
+        self.pending_cam_idx = None
+        self.camera_lock = threading.Lock()
 
         self.is_running = True
         self.is_frozen = False
@@ -310,7 +314,6 @@ class VisionInspector:
             if tmp_cap.isOpened():
                 tmp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
                 tmp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-                time.sleep(0.8)
                 ret, frame = tmp_cap.read()
                 if ret and frame is not None:
                     self.current_cam_idx = idx
@@ -319,14 +322,37 @@ class VisionInspector:
         return None
 
     def switch_camera(self):
+        with self.camera_lock:
+            if self.camera_switching:
+                return
+            self.camera_switching = True
+
+        def _find_camera():
+            new_cap = self.auto_scan_and_connect(self.current_cam_idx + 1)
+            with self.camera_lock:
+                self.pending_camera = new_cap
+                self.pending_cam_idx = self.current_cam_idx if new_cap else None
+                self.camera_switching = False
+
+        threading.Thread(target=_find_camera, daemon=True).start()
+
+    def _apply_pending_camera(self):
+        with self.camera_lock:
+            new_cap = self.pending_camera
+            cam_idx = self.pending_cam_idx
+            self.pending_camera = None
+            self.pending_cam_idx = None
+
+        if new_cap is None:
+            return
+
         old_cap = self.cap
-        new_cap = self.auto_scan_and_connect(self.current_cam_idx + 1)
-        if new_cap:
-            old_cap.release()
-            self.cap = new_cap
-            self.setup_camera()
-            self.is_frozen = False
-            self.loaded_frame = None
+        self.cap = new_cap
+        self.current_cam_idx = cam_idx
+        old_cap.release()
+        self.setup_camera()
+        self.is_frozen = False
+        self.loaded_frame = None
 
     def load_image_action(self):
         root = tk.Tk()
@@ -1171,6 +1197,8 @@ class VisionInspector:
         while self.is_running:
             if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1:
                 break
+
+            self._apply_pending_camera()
 
             if self.loaded_frame is not None:
                 frame = self.loaded_frame.copy()
