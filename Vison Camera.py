@@ -6,6 +6,7 @@ import sys
 import time
 import threading
 import random
+import subprocess
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, simpledialog, messagebox
@@ -333,6 +334,25 @@ class VisionInspector:
         tmp_cap.release()
         return None
 
+    @staticmethod
+    def _get_camera_names():
+        """Windows 장치 관리자에서 카메라 이름을 가져옴"""
+        try:
+            command = (
+                "Get-PnpDevice -Class Camera -Status OK "
+                "| Select-Object -ExpandProperty FriendlyName"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        except (OSError, subprocess.SubprocessError):
+            return []
+
     def switch_camera(self):
         root = tk.Tk()
         root.withdraw()
@@ -346,9 +366,11 @@ class VisionInspector:
 
         tk.Label(dialog, text="연결할 카메라를 선택하세요:").pack(pady=(12, 5))
         camera_list = tk.Listbox(dialog, height=8, exportselection=False)
+        camera_names = self._get_camera_names()
         for idx in range(6):
-            label = "현재 카메라" if idx == self.current_cam_idx else "카메라"
-            camera_list.insert(tk.END, f"{label} {idx}")
+            label = camera_names[idx] if idx < len(camera_names) else "장치명 확인 불가"
+            current = " (현재)" if idx == self.current_cam_idx else ""
+            camera_list.insert(tk.END, f"카메라 {idx}: {label}{current}")
         camera_list.selection_set(self.current_cam_idx)
         camera_list.pack(fill=tk.BOTH, expand=True, padx=15)
 
