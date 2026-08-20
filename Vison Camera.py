@@ -295,7 +295,7 @@ class VisionInspector:
     def setup_camera(self):
         # 안정된 해상도를 얻기 위해 여러 프레임 읽기
         w, h = 0, 0
-        for _ in range(10):
+        for _ in range(3):
             ret, frame = self.cap.read()
             if ret and frame is not None:
                 h, w = frame.shape[:2]
@@ -338,13 +338,23 @@ class VisionInspector:
             if self.camera_switching:
                 return
             self.camera_switching = True
+            old_cap = self.cap
+            old_idx = self.current_cam_idx
+            self.cap = None
+
+        if old_cap is not None:
+            old_cap.release()
 
         def _find_camera():
-            next_idx = (self.current_cam_idx + 1) % 6
+            next_idx = (old_idx + 1) % 6
             new_cap = self._open_camera(next_idx)
+            selected_idx = next_idx
+            if new_cap is None:
+                new_cap = self._open_camera(old_idx)
+                selected_idx = old_idx if new_cap is not None else None
             with self.camera_lock:
                 self.pending_camera = new_cap
-                self.pending_cam_idx = next_idx if new_cap else None
+                self.pending_cam_idx = selected_idx
                 self.camera_switching = False
 
         threading.Thread(target=_find_camera, daemon=True).start()
@@ -362,7 +372,8 @@ class VisionInspector:
         old_cap = self.cap
         self.cap = new_cap
         self.current_cam_idx = cam_idx
-        old_cap.release()
+        if old_cap is not None:
+            old_cap.release()
         self.setup_camera()
         self.is_frozen = False
         self.loaded_frame = None
@@ -1212,6 +1223,10 @@ class VisionInspector:
                 break
 
             self._apply_pending_camera()
+
+            if self.cap is None:
+                cv2.waitKey(1)
+                continue
 
             if self.loaded_frame is not None:
                 frame = self.loaded_frame.copy()
