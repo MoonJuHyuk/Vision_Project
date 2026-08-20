@@ -30,6 +30,7 @@ class VisionInspector:
         self.is_running = True
         self.is_frozen = False
         self.frozen_frame = None
+        self.loaded_frame = None
         self.last_full_canvas = None
         self.view_w, self.ui_w = 1200, 340
         self.total_w = self.view_w + self.ui_w
@@ -63,10 +64,13 @@ class VisionInspector:
         self.btn_labels = {
             'SWITCH_CAM': '카메라 전환',
             'FREEZE_LIVE': '정지 / 라이브',
+            'LOAD_IMAGE': '사진 불러오기',
             'LOAD_DXF': '도면 불러오기',
             'DXF_COLOR': '도면 색상',
             'PAN': '이동 (PAN)',
             'ZOOM': '확대 / 축소',
+            'ZOOM_IN': '확대 +',
+            'ZOOM_OUT': '축소 -',
             'ROTATE': '회전 (Angle)',
             'CROSS': '십자선',
             'CROSS_COLOR': '십자선 색상',
@@ -87,7 +91,7 @@ class VisionInspector:
         self.button_sections = [
             {
                 'title': '카메라 제어',
-                'buttons': [['SWITCH_CAM', 'FREEZE_LIVE']]
+                'buttons': [['SWITCH_CAM', 'FREEZE_LIVE'], ['LOAD_IMAGE', 'SAVE_IMG']]
             },
             {
                 'title': '도면 관리',
@@ -97,6 +101,7 @@ class VisionInspector:
                 'title': '뷰 조작',
                 'buttons': [
                     ['PAN', 'ZOOM'],
+                    ['ZOOM_IN', 'ZOOM_OUT'],
                     ['ROTATE', 'CROSS'],
                     ['CROSS_COLOR', 'CROSS_UNDO'],
                     ['CLEAR']
@@ -119,7 +124,7 @@ class VisionInspector:
             },
             {
                 'title': '시스템',
-                'buttons': [['SAVE_IMG', 'QUIT']]
+                'buttons': [['QUIT']]
             }
         ]
 
@@ -154,7 +159,10 @@ class VisionInspector:
         self.curr_mx, self.curr_my = 0, 0
         self.cross_preview_pos = None  # 마우스 미리보기 위치 (x, y)
         self.cross_angle = 0.0         # 십자선 회전 각도 (도)
-        self.crosshairs = []           # 배치된 십자선 리스트: [(x, y, angle), ...]
+        self.cross_size = 1.0          # 십자선 크기 배율
+        self.crosshairs = []           # 배치된 십자선 리스트: [(x, y, angle, size), ...]
+        self.cross_edit_idx = None     # 현재 조정 중인 십자선 인덱스
+        self.cross_selected_idx = None # 선택된 십자선 인덱스
 
         # 저울 관련 초기화
         self.scale_weight = None          # 현재 무게값 (g)
@@ -318,6 +326,38 @@ class VisionInspector:
             self.cap = new_cap
             self.setup_camera()
             self.is_frozen = False
+            self.loaded_frame = None
+
+    def load_image_action(self):
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askopenfilename(
+            filetypes=[("이미지 파일", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
+                       ("모든 파일", "*.*")],
+            parent=root
+        )
+        root.destroy()
+        if not path:
+            return
+
+        try:
+            image_data = np.fromfile(path, dtype=np.uint8)
+            image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+        except (OSError, ValueError, cv2.error):
+            image = None
+        if image is None:
+            messagebox.showerror("사진 불러오기 실패", "이미지 파일을 읽을 수 없습니다.")
+            return
+
+        self.loaded_frame = image
+        self.is_frozen = False
+        self.frozen_frame = None
+
+    def _get_frame_ratios(self, frame):
+        """현재 프레임을 화면 좌표로 변환할 때 사용할 가로·세로 비율"""
+        frame_h, frame_w = frame.shape[:2]
+        return frame_w / self.view_w, frame_h / max(1, self.cam_display_h)
 
     # ──────────────────────────────────────────────
     # DXF 로딩 (핵심 수정 부분)
@@ -558,20 +598,41 @@ class VisionInspector:
         if (self.curr_mx < self.view_w and
                 self.cam_y_offset <= self.curr_my < self.cam_y_offset + self.cam_display_h and
                 self.last_full_canvas is not None):
-            w_ratio = self.cam_w / self.view_w
-            rx = int(self.curr_mx * w_ratio)
-            ry = int((self.curr_my - self.cam_y_offset) * w_ratio)
+
+            src_h, src_w = self.last_full_canvas.shape[:2]
+
+            x_ratio = src_w / max(1, self.view_w)
+            y_ratio = src_h / max(1, self.cam_display_h)
+
+            rx = int(self.curr_mx * x_ratio)
+            ry = int((self.curr_my - self.cam_y_offset) * y_ratio)
+
+            rx = max(0, min(rx, src_w - 1))
+            ry = max(0, min(ry, src_h - 1))
+
             roi_s = 30
-            y1c, y2c = max(0, ry - roi_s), min(self.cam_h, ry + roi_s)
-            x1c, x2c = max(0, rx - roi_s), min(self.cam_w, rx + roi_s)
-            if y2c > y1c and x2c > x1c:
-                roi = self.last_full_canvas[y1c:y2c, x1c:x2c]
-                roi_res = cv2.resize(roi, (mag_size, mag_size), interpolation=cv2.INTER_NEAREST)
+            y1c = max(0, ry - roi_s)
+            y2c = min(src_h, ry + roi_s)
+            x1c = max(0, rx - roi_s)
+            x2c = min(src_w, rx + roi_s)
+
+            roi = self.last_full_canvas[y1c:y2c, x1c:x2c]
+
+            if roi is not None and roi.size > 0:
+                roi_res = cv2.resize(
+                    roi,
+                    (mag_size, mag_size),
+                    interpolation=cv2.INTER_NEAREST
+                )
+
                 display_img[mag_y1:mag_y2, mag_x1:mag_x2] = roi_res
+
                 cx_m = mag_x1 + mag_size // 2
                 cy_m = mag_y1 + mag_size // 2
-                cv2.line(display_img, (cx_m, mag_y1), (cx_m, mag_y2), (0, 255, 0), 1)
-                cv2.line(display_img, (mag_x1, cy_m), (mag_x2, cy_m), (0, 255, 0), 1)
+                cv2.line(display_img, (cx_m, mag_y1),
+                         (cx_m, mag_y2), (0, 255, 0), 1)
+                cv2.line(display_img, (mag_x1, cy_m),
+                         (mag_x2, cy_m), (0, 255, 0), 1)
 
         # PIL 텍스트
         img_pil = Image.fromarray(display_img)
@@ -587,6 +648,14 @@ class VisionInspector:
 
         draw.text((self.view_w + 20, 12), "VISION MEASUREMENT", font=font_title,  fill=(204, 122, 0))
         draw.text((self.view_w + 20, 32), "SYSTEM v2.1",        font=font_status, fill=self.clr_text_dim)
+
+        # 현재 배율을 상단에 더 크게 표시해 드래그 중에도 실시간 변화가 보이도록 함
+        zoom_value = self.scale
+        zoom_delta = zoom_value - 1.0
+        zoom_label = f"배율: {zoom_value:.2f}x"
+        zoom_change = f"변화: {zoom_delta:+.2f}x"
+        draw.text((self.view_w + 18, 50), zoom_label, font=font_title, fill=(255, 214, 0))
+        draw.text((self.view_w + 160, 52), zoom_change, font=font_status, fill=(120, 220, 255))
 
         for title, y_pos in self.section_headers.items():
             draw.text((self.view_w + 20, y_pos + 2), title, font=font_section, fill=self.clr_text_dim)
@@ -606,9 +675,11 @@ class VisionInspector:
         status_texts = [
             f"모드: {self.btn_labels.get(self.current_mode, self.current_mode)}",
             f"배율: {self.scale:.2f}x",
+            f"변화: {self.scale - 1.0:+.2f}x",
             f"회전: {self.angle:.1f}°",
             f"측정: {len(self.measurements)}개",
             f"십자선: {len(self.crosshairs)}개",
+            f"십자선크기: {self.cross_size:.2f}x",
             f"카메라: {self.current_cam_idx}",
             f"상태: {'정지' if self.is_frozen else '라이브'}",
             f"도형: {len(self.dxf_contours)}개",
@@ -623,11 +694,54 @@ class VisionInspector:
 
         return np.array(img_pil)
 
+    def _select_last_crosshair(self):
+        """마지막 십자선을 선택 대상으로 고정"""
+        if not self.crosshairs:
+            self.cross_selected_idx = None
+            self.cross_edit_idx = None
+            return None
+        idx = len(self.crosshairs) - 1
+        self.cross_selected_idx = idx
+        self.cross_edit_idx = idx
+        return idx
+
+    def _apply_crosshair_zoom(self, delta_size):
+        """선택된 십자선의 크기를 조절. 상한을 제거해 무제한 확대가 가능하게 함"""
+        if self.crosshairs:
+            idx = self.cross_selected_idx if self.cross_selected_idx is not None else self._select_last_crosshair()
+            if idx is None or not (0 <= idx < len(self.crosshairs)):
+                return
+            px, py, pangle, psize = self.crosshairs[idx]
+            new_size = max(0.2, psize + delta_size)
+            self.crosshairs[idx] = (px, py, pangle, new_size)
+            self.cross_size = new_size
+            self.cross_selected_idx = idx
+            self.cross_edit_idx = idx
+            return
+
+        self.scale = max(0.05, self.scale + delta_size * 0.08)
+        self.cross_size = max(0.2, self.cross_size + delta_size)
+
+    def _apply_crosshair_rotation(self, delta_deg):
+        """선택된 십자선의 각도를 조절"""
+        if not self.crosshairs:
+            self.angle = (self.angle + delta_deg) % 360
+            return
+        idx = self.cross_selected_idx if self.cross_selected_idx is not None else self._select_last_crosshair()
+        if idx is None or not (0 <= idx < len(self.crosshairs)):
+            return
+        px, py, pangle, psize = self.crosshairs[idx]
+        new_angle = (pangle + delta_deg) % 360
+        self.crosshairs[idx] = (px, py, new_angle, psize)
+        self.cross_selected_idx = idx
+        self.cross_edit_idx = idx
+
     def draw_crosshair(self, canvas):
         """십자선 오버레이 - 배치된 십자선 + CROSS 모드 미리보기"""
         # 수평 13mm, 수직 5mm (self.scale = px/mm)
-        H_ARM = 6.5 * self.scale   # 수평 반길이 (px)
-        V_ARM = 2.5 * self.scale   # 수직 반길이 (px)
+        # CROSS 모드에서는 크기 배율을 별도로 두어 휠로 즉시 조절 가능
+        H_ARM = 6.5 * self.scale * self.cross_size   # 수평 반길이 (px)
+        V_ARM = 2.5 * self.scale * self.cross_size   # 수직 반길이 (px)
 
         def _draw_one(img, cx, cy, angle_deg, color, label=None):
             rad = np.radians(angle_deg)
@@ -655,8 +769,16 @@ class VisionInspector:
         preview_clr = tuple(int(c * 0.6) for c in cross_clr)
 
         # ── 배치된 십자선들 ──
-        for i, (px, py, pangle) in enumerate(self.crosshairs):
-            _draw_one(canvas, px, py, pangle, cross_clr, label=f"#{i+1}")
+        for i, (px, py, pangle, psize) in enumerate(self.crosshairs):
+            # 저장된 각도와 크기 비율로 다시 그림
+            prev_size = self.cross_size
+            self.cross_size = psize
+            color = cross_clr
+            if self.cross_selected_idx == i:
+                color = (255, 255, 255)
+                cv2.circle(canvas, (int(px), int(py)), 8, (255, 255, 255), 1)
+            _draw_one(canvas, px, py, pangle, color, label=f"#{i+1}")
+            self.cross_size = prev_size
 
         # ── 미리보기 (CROSS 모드일 때만) ──
         if self.current_mode == 'CROSS' and self.cross_preview_pos is not None:
@@ -741,9 +863,13 @@ class VisionInspector:
         if event == cv2.EVENT_LBUTTONUP:
             self.pressed_button = None
 
-        w_ratio = self.cam_w / self.view_w
-        rx = x * w_ratio
-        ry = (y - self.cam_y_offset) * w_ratio
+        if self.loaded_frame is not None:
+            x_ratio, y_ratio = self._get_frame_ratios(self.loaded_frame)
+        else:
+            x_ratio = self.cam_w / self.view_w
+            y_ratio = self.cam_h / max(1, self.cam_display_h)
+        rx = x * x_ratio
+        ry = (y - self.cam_y_offset) * y_ratio
 
         if flags & cv2.EVENT_FLAG_SHIFTKEY:
             if self.measure_p1:
@@ -757,21 +883,48 @@ class VisionInspector:
                 else:
                     rx = self.calib_p1[0]
 
-        if event == cv2.EVENT_MOUSEWHEEL and self.current_mode == 'CROSS':
+        if event == cv2.EVENT_MOUSEWHEEL:
             step = 1.0 if (flags > 0) else -1.0
-            if flags & cv2.EVENT_FLAG_SHIFTKEY:
-                step *= 0.1   # Shift 누르면 0.1° 단위
-            self.cross_angle = (self.cross_angle + step) % 360
-            return
+            if self.current_mode == 'CROSS':
+                if flags & cv2.EVENT_FLAG_SHIFTKEY:
+                    self.cross_angle = (self.cross_angle + step * 0.1) % 360
+                    self.cross_size = max(0.2, self.cross_size + step * 0.08)
+                else:
+                    self.cross_angle = (self.cross_angle + step) % 360
+                    self.cross_size = max(0.2, self.cross_size + step * 0.15)
+                return
+
+            if self.current_mode == 'ZOOM':
+                self._apply_crosshair_zoom(step * 0.35)
+                return
+
+            if self.current_mode == 'ROTATE':
+                self._apply_crosshair_rotation(step * 3.0)
+                return
 
         if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
             if self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
                 self.is_dragging = True
                 self.lmx, self.lmy = x, y
+                if self.crosshairs:
+                    best_idx = None
+                    best_dist = 20
+                    for idx, (cx, cy, _, _) in enumerate(self.crosshairs):
+                        dist = np.hypot(rx - cx, ry - cy)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_idx = idx
+                    if best_idx is not None:
+                        self.cross_selected_idx = best_idx
+                        self.cross_edit_idx = best_idx
+                    else:
+                        self.cross_selected_idx = len(self.crosshairs) - 1
+                        self.cross_edit_idx = len(self.crosshairs) - 1
                 return
             if self.current_mode == 'CROSS':
-                # 클릭 위치에 십자선 스탬프 배치
-                self.crosshairs.append((rx, ry, self.cross_angle))
+                self.crosshairs.append((rx, ry, self.cross_angle, self.cross_size))
+                self.cross_selected_idx = len(self.crosshairs) - 1
+                self.cross_edit_idx = len(self.crosshairs) - 1
                 return
 
             if 'MEAS' in self.current_mode:
@@ -812,16 +965,43 @@ class VisionInspector:
             if self.current_mode == 'CALIB':
                 self.calib_p2 = (rx, ry)
             else:
-                dx = (x - self.lmx) * w_ratio
-                dy = (y - self.lmy) * w_ratio
+                dx = (x - self.lmx) * x_ratio
+                dy = (y - self.lmy) * y_ratio
                 if self.current_mode == 'PAN':
-                    self.offset_x += dx
-                    self.offset_y += dy
+                    if self.crosshairs and self.cross_selected_idx is not None:
+                        idx = self.cross_selected_idx
+                        if 0 <= idx < len(self.crosshairs):
+                            px, py, pangle, psize = self.crosshairs[idx]
+                            self.crosshairs[idx] = (px + dx, py + dy, pangle, psize)
+                    else:
+                        self.offset_x += dx
+                        self.offset_y += dy
                 elif self.current_mode == 'ZOOM':
-                    self.scale *= (1 - (y - self.lmy) * 0.005)
-                    self.scale = max(0.01, self.scale)
+                    if self.crosshairs and x <= self.view_w:
+                        idx = self.cross_edit_idx if self.cross_edit_idx is not None else (len(self.crosshairs) - 1)
+                        if 0 <= idx < len(self.crosshairs):
+                            px, py, pangle, psize = self.crosshairs[idx]
+                            factor = 1.0 - (y - self.lmy) * 0.005
+                            new_size = max(0.2, psize * factor)
+                            self.crosshairs[idx] = (px, py, pangle, new_size)
+                            self.cross_selected_idx = idx
+                            self.cross_edit_idx = idx
+                            self.cross_size = new_size
+                        else:
+                            self.scale *= (1 - (y - self.lmy) * 0.005)
+                            self.scale = max(0.05, self.scale)
+                    else:
+                        self.scale *= (1 - (y - self.lmy) * 0.005)
+                        self.scale = max(0.05, self.scale)
                 elif self.current_mode == 'ROTATE':
-                    self.angle += (x - self.lmx) * 0.2
+                    if self.crosshairs and x <= self.view_w:
+                        idx = self.cross_edit_idx if self.cross_edit_idx is not None else (len(self.crosshairs) - 1)
+                        if 0 <= idx < len(self.crosshairs):
+                            px, py, pangle, psize = self.crosshairs[idx]
+                            new_angle = (pangle + (x - self.lmx) * 0.2) % 360
+                            self.crosshairs[idx] = (px, py, new_angle, psize)
+                    else:
+                        self.angle += (x - self.lmx) * 0.2
                 self.lmx, self.lmy = x, y
 
         if event == cv2.EVENT_LBUTTONUP:
@@ -837,12 +1017,18 @@ class VisionInspector:
                         self.scale = dist_px / val
                         self.calib_temp_data = (self.calib_p1, (rx, ry), val)
             self.is_dragging = False
+            if self.current_mode not in ['PAN', 'ZOOM', 'ROTATE']:
+                self.cross_edit_idx = None
+                self.cross_selected_idx = None
             self.calib_p1 = self.calib_p2 = None
 
     def _handle_button(self, m):
         """버튼 클릭 처리 분리"""
         if m == 'FREEZE_LIVE':
-            if not self.is_frozen:
+            if self.loaded_frame is not None:
+                self.loaded_frame = None
+                self.is_frozen = False
+            elif not self.is_frozen:
                 ret, frame = self.cap.read()
                 if ret:
                     self.frozen_frame = frame.copy()
@@ -852,6 +1038,9 @@ class VisionInspector:
 
         elif m == 'SWITCH_CAM':
             self.switch_camera()
+
+        elif m == 'LOAD_IMAGE':
+            self.load_image_action()
 
         elif m == 'DXF_COLOR':
             self.idx_dxf_color = (self.idx_dxf_color + 1) % len(self.color_palette)
@@ -952,6 +1141,14 @@ class VisionInspector:
         elif m == 'SCALE_SAVE':
             self.save_weight()
 
+        elif m == 'ZOOM_IN':
+            self.current_mode = 'ZOOM'
+            self._apply_crosshair_zoom(0.8)
+
+        elif m == 'ZOOM_OUT':
+            self.current_mode = 'ZOOM'
+            self._apply_crosshair_zoom(-0.8)
+
         elif m == 'QUIT':
             self.is_running = False
 
@@ -959,6 +1156,8 @@ class VisionInspector:
             self.current_mode = m
             self.measure_p1 = None
             self.measure_p2 = None
+            if self.crosshairs:
+                self._select_last_crosshair()
             if m != 'CROSS':
                 self.cross_preview_pos = None
 
@@ -973,8 +1172,11 @@ class VisionInspector:
             if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1:
                 break
 
-            frame = self.frozen_frame.copy() if self.is_frozen else None
-            if not self.is_frozen:
+            if self.loaded_frame is not None:
+                frame = self.loaded_frame.copy()
+            elif self.is_frozen:
+                frame = self.frozen_frame.copy()
+            else:
                 ret, frame = self.cap.read()
                 if not ret:
                     continue
@@ -1025,19 +1227,34 @@ class VisionInspector:
                 cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
 
-            w_ratio = self.cam_w / self.view_w
+            x_ratio, y_ratio = self._get_frame_ratios(frame)
 
             # ── 드래그 마커 ───────────────────────
             if self.is_dragging and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
-                mx = int(self.curr_mx * w_ratio)
-                my = int((self.curr_my - self.cam_y_offset) * w_ratio)
+                mx = int(self.curr_mx * x_ratio)
+                my = int((self.curr_my - self.cam_y_offset) * y_ratio)
                 cv2.drawMarker(canvas, (mx, my), (0, 255, 255),
                                markerType=cv2.MARKER_CROSS, markerSize=25, thickness=1)
 
             # ── 측정 임시 표시 ────────────────────
-            if self.measure_p2:
-                cx = int(self.curr_mx * w_ratio)
-                cy = int((self.curr_my - self.cam_y_offset) * w_ratio)
+            if self.measure_p1 and not self.measure_p2:
+                p1 = (int(self.measure_p1[0]), int(self.measure_p1[1]))
+                p2 = (int(self.curr_mx * x_ratio), int((self.curr_my - self.cam_y_offset) * y_ratio))
+                if self.current_mode == 'MEAS_HV':
+                    if abs(p2[0] - p1[0]) > abs(p2[1] - p1[1]):
+                        p2 = (p2[0], p1[1])
+                    else:
+                        p2 = (p1[0], p2[1])
+                cv2.line(canvas, p1, p2, meas_clr, 1)
+                cv2.circle(canvas, p1, 5, meas_clr, 1)
+                cv2.circle(canvas, p2, 3, meas_clr, 1)
+                preview_len = np.linalg.norm(np.array(p1) - np.array(p2)) / self.scale
+                cv2.putText(canvas, f"{preview_len:.3f}mm",
+                            (max(10, p2[0]), max(10, p2[1])),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, meas_clr, 1)
+            elif self.measure_p2:
+                cx = int(self.curr_mx * x_ratio)
+                cy = int((self.curr_my - self.cam_y_offset) * y_ratio)
                 cv2.putText(canvas, f"{self.measure_temp_val / self.scale:.3f}mm",
                             (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
             elif self.measure_p1:
@@ -1045,8 +1262,8 @@ class VisionInspector:
 
             # ── 캘리브 임시 표시 ──────────────────
             if self.calib_temp_data:
-                cx = int(self.curr_mx * w_ratio)
-                cy = int((self.curr_my - self.cam_y_offset) * w_ratio)
+                cx = int(self.curr_mx * x_ratio)
+                cy = int((self.curr_my - self.cam_y_offset) * y_ratio)
                 cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm",
                             (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
             elif self.calib_p1 and self.calib_p2:
