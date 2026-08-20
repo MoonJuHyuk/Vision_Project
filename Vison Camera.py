@@ -31,6 +31,8 @@ class VisionInspector:
         self.pending_camera = None
         self.pending_cam_idx = None
         self.camera_lock = threading.Lock()
+        self.camera_list_visible = False
+        self.camera_names = []
 
         self.is_running = True
         self.is_frozen = False
@@ -354,36 +356,37 @@ class VisionInspector:
             return []
 
     def switch_camera(self):
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
+        self.camera_names = self._get_camera_names()
+        self.camera_list_visible = not self.camera_list_visible
 
-        dialog = tk.Toplevel(root)
-        dialog.title("카메라 선택")
-        dialog.geometry("300x280")
-        dialog.resizable(False, False)
-        dialog.attributes("-topmost", True)
+    def _camera_list_bounds(self, idx):
+        row_y = 82 + idx * 34
+        return (self.view_w + 12, row_y, self.total_w - 12, row_y + 28)
 
-        tk.Label(dialog, text="연결할 카메라를 선택하세요:").pack(pady=(12, 5))
-        camera_list = tk.Listbox(dialog, height=8, exportselection=False)
-        camera_names = self._get_camera_names()
+    def _draw_camera_list(self, display_img, draw, font_section, font_status):
+        draw.text((self.view_w + 20, 68), "카메라 선택", font=font_section,
+                  fill=self.clr_text)
+        draw.text((self.view_w + 20, 84), "항목을 클릭하면 전환합니다", font=font_status,
+                  fill=self.clr_text_dim)
+
         for idx in range(6):
-            label = camera_names[idx] if idx < len(camera_names) else "장치명 확인 불가"
-            current = " (현재)" if idx == self.current_cam_idx else ""
-            camera_list.insert(tk.END, f"카메라 {idx}: {label}{current}")
-        camera_list.selection_set(self.current_cam_idx)
-        camera_list.pack(fill=tk.BOTH, expand=True, padx=15)
+            x1, y1, x2, y2 = self._camera_list_bounds(idx)
+            is_current = idx == self.current_cam_idx
+            is_hovered = (self.view_w + 12 <= self.curr_mx <= self.total_w - 12 and
+                          y1 <= self.curr_my <= y2)
+            if is_current:
+                fill = self.clr_active
+            elif is_hovered:
+                fill = self.clr_hover
+            else:
+                fill = self.clr_panel
+            draw.rectangle((x1, y1, x2, y2), fill=fill, outline=self.clr_border, width=1)
 
-        def select_camera():
-            selection = camera_list.curselection()
-            if selection:
-                self._start_camera_switch(selection[0])
-            dialog.destroy()
-            root.destroy()
-
-        tk.Button(dialog, text="연결", command=select_camera).pack(pady=12)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: (dialog.destroy(), root.destroy()))
-        root.mainloop()
+            label = self.camera_names[idx] if idx < len(self.camera_names) else "장치명 확인 불가"
+            label = label[:30]
+            suffix = "  [현재]" if is_current else ""
+            draw.text((x1 + 8, y1 + 7), f"카메라 {idx}: {label}{suffix}",
+                      font=font_status, fill=self.clr_text)
 
     def _start_camera_switch(self, target_idx):
         with self.camera_lock:
@@ -793,6 +796,9 @@ class VisionInspector:
             if i % 2 == 1:
                 y_pos += 16
 
+        if self.camera_list_visible:
+            self._draw_camera_list(display_img, draw, font_section, font_status)
+
         return np.array(img_pil)
 
     def _select_last_crosshair(self):
@@ -955,6 +961,13 @@ class VisionInspector:
                     break
 
         if event == cv2.EVENT_LBUTTONDOWN and x > self.view_w:
+            if self.camera_list_visible:
+                for idx in range(6):
+                    x1, y1, x2, y2 = self._camera_list_bounds(idx)
+                    if x1 <= x <= x2 and y1 <= y <= y2:
+                        self.camera_list_visible = False
+                        self._start_camera_switch(idx)
+                        return
             for m, (bx1, by1, bx2, by2) in self.buttons.items():
                 if bx1 <= x <= bx2 and by1 <= y <= by2:
                     self.pressed_button = m
