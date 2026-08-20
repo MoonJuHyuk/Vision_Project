@@ -178,6 +178,7 @@ class VisionInspector:
         self.scale_com_port = None
         self.scale_serial = None
         self.scale_thread = None
+        self.scale_error = None
         self.scale_lock = threading.Lock()
         self.weight_log = []              # 저장된 무게 기록
 
@@ -213,23 +214,41 @@ class VisionInspector:
                                 parity='N', stopbits=1, timeout=1)
             self.scale_serial = ser
             self.scale_com_port = port
+            self.scale_error = None
             self.scale_connected = True
             self.scale_simulating = False
 
             def _read_loop():
+                import re
                 buf = ""
                 while self.scale_connected:
                     try:
-                        ch = ser.read(1).decode('ascii', errors='ignore')
-                        if ch in ('\r', '\n'):
-                            val = self._parse_weight(buf.strip())
+                        chunk = ser.read(ser.in_waiting or 1).decode(
+                            'ascii', errors='ignore'
+                        )
+                        if not chunk:
+                            continue
+                        buf += chunk
+                        frames = re.split(r'[\r\n]+', buf)
+                        buf = frames.pop()
+                        for frame in frames:
+                            val = self._parse_weight(frame.strip())
                             if val is not None:
                                 with self.scale_lock:
                                     self.scale_weight = val
-                            buf = ""
-                        else:
-                            buf += ch
-                    except Exception:
+                        if not frames and buf:
+                            matches = list(re.finditer(
+                                r'[-+]?\d+(?:[.,]\d+)', buf
+                            ))
+                            if matches:
+                                val = self._parse_weight(matches[-1].group())
+                                if val is not None:
+                                    with self.scale_lock:
+                                        self.scale_weight = val
+                                    buf = buf[matches[-1].end():]
+                    except Exception as ex:
+                        self.scale_error = str(ex)
+                        self.scale_connected = False
                         break
 
             t = threading.Thread(target=_read_loop, daemon=True)
@@ -237,6 +256,7 @@ class VisionInspector:
             self.scale_thread = t
             return True
         except Exception as ex:
+            self.scale_error = str(ex)
             messagebox.showerror("저울 연결 실패", str(ex))
             return False
 
@@ -255,12 +275,9 @@ class VisionInspector:
     def _parse_weight(raw):
         """저울 출력 문자열에서 숫자만 추출 (예: '  12.34 g' → 12.34)"""
         import re
-        m = re.search(r'[\d]+\.[\d]+', raw)
+        m = re.search(r'[-+]?\d+(?:[.,]\d+)?', raw)
         if m:
-            return float(m.group())
-        m = re.search(r'[\d]+', raw)
-        if m:
-            return float(m.group())
+            return float(m.group().replace(',', '.'))
         return None
 
     def save_weight(self):
@@ -786,6 +803,7 @@ class VisionInspector:
             f"십자선크기: {self.cross_size:.2f}x",
             f"카메라: {self.current_cam_idx}",
             f"상태: {'정지' if self.is_frozen else '라이브'}",
+            f"저울: {self.scale_error[:24] if self.scale_error else ('연결' if self.scale_connected else '시뮬레이션')}",
             f"도형: {len(self.dxf_contours)}개",
             f"저장: {len(self.weight_log)}건",
         ]
