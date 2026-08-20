@@ -310,15 +310,27 @@ class VisionInspector:
     def auto_scan_and_connect(self, start_idx):
         for i in range(start_idx, start_idx + 6):
             idx = i % 6
-            tmp_cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-            if tmp_cap.isOpened():
-                tmp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-                tmp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-                ret, frame = tmp_cap.read()
-                if ret and frame is not None:
-                    self.current_cam_idx = idx
-                    return tmp_cap
+            tmp_cap = self._open_camera(idx)
+            if tmp_cap is not None:
+                self.current_cam_idx = idx
+                return tmp_cap
+        return None
+
+    @staticmethod
+    def _open_camera(idx):
+        """카메라 하나만 열고 첫 프레임이 정상인지 확인"""
+        tmp_cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not tmp_cap.isOpened():
             tmp_cap.release()
+            return None
+
+        tmp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        tmp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        ret, frame = tmp_cap.read()
+        if ret and frame is not None:
+            return tmp_cap
+
+        tmp_cap.release()
         return None
 
     def switch_camera(self):
@@ -328,10 +340,11 @@ class VisionInspector:
             self.camera_switching = True
 
         def _find_camera():
-            new_cap = self.auto_scan_and_connect(self.current_cam_idx + 1)
+            next_idx = (self.current_cam_idx + 1) % 6
+            new_cap = self._open_camera(next_idx)
             with self.camera_lock:
                 self.pending_camera = new_cap
-                self.pending_cam_idx = self.current_cam_idx if new_cap else None
+                self.pending_cam_idx = next_idx if new_cap else None
                 self.camera_switching = False
 
         threading.Thread(target=_find_camera, daemon=True).start()
