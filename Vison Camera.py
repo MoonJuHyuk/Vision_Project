@@ -3,9 +3,7 @@ import numpy as np
 import ezdxf
 import os
 import sys
-import time
 import threading
-import random
 import subprocess
 from datetime import datetime
 import tkinter as tk
@@ -90,6 +88,7 @@ class VisionInspector:
             'CROSS': '십자선',
             'CROSS_COLOR': '십자선 색상',
             'CROSS_UNDO': '십자선 취소',
+            'DXF_REAL': '도면 실측크기',
             'CLEAR': '전체 삭제',
             'MEAS_P2P': '직선 측정',
             'MEAS_HV': '수평수직 측정',
@@ -119,7 +118,7 @@ class VisionInspector:
                     ['ZOOM_IN', 'ZOOM_OUT'],
                     ['ROTATE', 'CROSS'],
                     ['CROSS_COLOR', 'CROSS_UNDO'],
-                    ['CLEAR']
+                    ['DXF_REAL', 'CLEAR']
                 ]
             },
             {
@@ -159,7 +158,9 @@ class VisionInspector:
         self.init_buttons()
 
         self.offset_x, self.offset_y = 0, 0  # 캔버스 중심 기준 pan 델타
-        self.scale = 1.0
+        self.scale = 1.0               # 도면 표시 배율 (px/mm) - 도면 확대/축소 시 바뀜
+        self.calib_px_per_mm = None    # 측정 기준 (px/mm) - 캘리브레이션으로만 바뀜, None이면 미보정
+        self.calib_notice = ""         # 캘리브레이션이 초기화된 이유 (화면 안내용)
         self.angle = 0.0
 
         self.measurements = []
@@ -182,7 +183,6 @@ class VisionInspector:
         # 저울 관련 초기화
         self.scale_weight = None          # 현재 무게값 (g)
         self.scale_connected = False      # 실제 시리얼 연결 여부
-        self.scale_simulating = True      # 시뮬레이션 모드
         self.scale_com_port = None
         self.scale_serial = None
         self.scale_thread = None
@@ -190,28 +190,12 @@ class VisionInspector:
         self.scale_lock = threading.Lock()
         self.weight_log = []              # 저장된 무게 기록
 
-        self._start_scale_simulation()
-
         if dxf_path:
             self.load_dxf_action(dxf_path)
 
     # ──────────────────────────────────────────────
     # 저울 (Scale)
     # ──────────────────────────────────────────────
-    def _start_scale_simulation(self):
-        """시뮬레이션 모드: 가상 무게값을 주기적으로 생성"""
-        def _sim_loop():
-            base = 12.34
-            while self.scale_simulating:
-                noise = random.uniform(-0.05, 0.05)
-                with self.scale_lock:
-                    self.scale_weight = round(base + noise, 2)
-                time.sleep(0.5)
-
-        t = threading.Thread(target=_sim_loop, daemon=True)
-        t.start()
-        self.scale_thread = t
-
     def connect_scale(self, port, baud=9600):
         """실제 RS-232 저울 연결 (pyserial 필요)"""
         if not SERIAL_AVAILABLE:
@@ -224,7 +208,6 @@ class VisionInspector:
             self.scale_com_port = port
             self.scale_error = None
             self.scale_connected = True
-            self.scale_simulating = False
 
             def _read_loop():
                 import re
@@ -235,6 +218,14 @@ class VisionInspector:
                             'ascii', errors='ignore'
                         )
                         if not chunk:
+                            # 1초(timeout) 동안 새 데이터가 없으면 줄바꿈 없이 끝난 값으로 보고 처리.
+                            # 전송 도중의 조각('+0012.3' 등)을 읽어 잘못된 값이 들어가는 것을 막음
+                            if buf.strip():
+                                val = self._parse_weight(buf.strip())
+                                if val is not None:
+                                    with self.scale_lock:
+                                        self.scale_weight = val
+                                buf = ""
                             continue
                         buf += chunk
                         frames = re.split(r'[\r\n]+', buf)
@@ -244,19 +235,12 @@ class VisionInspector:
                             if val is not None:
                                 with self.scale_lock:
                                     self.scale_weight = val
-                        if not frames and buf:
-                            matches = list(re.finditer(
-                                r'[-+]?\d+(?:[.,]\d+)', buf
-                            ))
-                            if matches:
-                                val = self._parse_weight(matches[-1].group())
-                                if val is not None:
-                                    with self.scale_lock:
-                                        self.scale_weight = val
-                                    buf = buf[matches[-1].end():]
                     except Exception as ex:
                         self.scale_error = str(ex)
                         self.scale_connected = False
+                        # 연결이 끊긴 뒤 마지막 값이 실제 값처럼 저장되지 않도록 비움
+                        with self.scale_lock:
+                            self.scale_weight = None
                         break
 
             t = threading.Thread(target=_read_loop, daemon=True)
@@ -276,8 +260,8 @@ class VisionInspector:
             except Exception:
                 pass
             self.scale_serial = None
-        self.scale_simulating = True
-        self._start_scale_simulation()
+        with self.scale_lock:
+            self.scale_weight = None
 
     @staticmethod
     def _parse_weight(raw):
@@ -290,6 +274,9 @@ class VisionInspector:
 
     def save_weight(self):
         """현재 무게를 로그에 저장하고 CSV 파일에 기록"""
+        if not self.scale_connected:
+            messagebox.showwarning("저울", "저울이 연결되어 있지 않습니다.\n'저울 연결'을 먼저 하세요.")
+            return
         with self.scale_lock:
             w = self.scale_weight
         if w is None:
@@ -301,12 +288,13 @@ class VisionInspector:
             'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'weight_g': w,
             'measurements': meas_count,
-            'source': '시뮬레이션' if self.scale_simulating else self.scale_com_port
+            'source': self.scale_com_port
         }
         self.weight_log.append(entry)
 
-        # CSV 저장 (프로젝트 폴더에 자동 기록)
-        csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weight_log.csv')
+        # CSV 저장 (실행한 파일과 같은 폴더에 자동 기록)
+        # 런처/exe로 실행하면 __file__이 없으므로 실행 파일 경로(sys.argv[0]) 기준으로 저장
+        csv_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'weight_log.csv')
         write_header = not os.path.exists(csv_path)
         try:
             with open(csv_path, 'a', encoding='utf-8-sig') as f:
@@ -456,6 +444,7 @@ class VisionInspector:
         self.setup_camera()
         self.is_frozen = False
         self.loaded_frame = None
+        self._reset_calibration("카메라가 바뀌어")
 
     def load_image_action(self):
         root = tk.Tk()
@@ -494,6 +483,7 @@ class VisionInspector:
         self.loaded_frame = image
         self.is_frozen = False
         self.frozen_frame = None
+        self._reset_calibration("사진을 불러와")
 
     def _get_frame_ratios(self, frame):
         """현재 프레임을 화면 좌표로 변환할 때 사용할 가로·세로 비율"""
@@ -639,7 +629,11 @@ class VisionInspector:
             self.dxf_contours = [(ctype, (pts - center) * [1, -1]) for ctype, pts in contours]
             self.dxf_real_width = (np.max(all_pts[:, 0]) - np.min(all_pts[:, 0]))
 
-            if self.scale <= 1.1 and self.dxf_real_width > 0:
+            if self.calib_px_per_mm:
+                # 캘리브레이션이 되어 있으면 도면을 실제 치수 크기로 표시
+                self.scale = self.calib_px_per_mm
+            elif self.scale <= 1.1 and self.dxf_real_width > 0:
+                # 미보정 상태에서는 모양 확인용으로 화면에 적당한 크기로 표시
                 ref_w = self.cam_w if 0 < self.cam_w <= 1920 else self.view_w
                 self.scale = (ref_w * 0.4) / self.dxf_real_width
 
@@ -784,19 +778,39 @@ class VisionInspector:
             font_section = ImageFont.truetype("malgun.ttf",  10)
             font_btn    = ImageFont.truetype("malgun.ttf",   10)
             font_status = ImageFont.truetype("malgun.ttf",    9)
+            font_section_warn = ImageFont.truetype("malgunbd.ttf", 14)
         except Exception:
-            font_title = font_section = font_btn = font_status = ImageFont.load_default()
+            font_title = font_section = font_btn = font_status = font_section_warn = ImageFont.load_default()
 
         draw.text((self.view_w + 20, 12), "VISION MEASUREMENT", font=font_title,  fill=(204, 122, 0))
         draw.text((self.view_w + 20, 32), "SYSTEM v2.1",        font=font_status, fill=self.clr_text_dim)
 
-        # 현재 배율을 상단에 더 크게 표시해 드래그 중에도 실시간 변화가 보이도록 함
-        zoom_value = self.scale
-        zoom_delta = zoom_value - 1.0
-        zoom_label = f"배율: {zoom_value:.2f}x"
-        zoom_change = f"변화: {zoom_delta:+.2f}x"
-        draw.text((self.view_w + 18, 50), zoom_label, font=font_title, fill=(255, 214, 0))
-        draw.text((self.view_w + 160, 52), zoom_change, font=font_status, fill=(120, 220, 255))
+        # 측정 기준(캘리브레이션)과 도면 배율 상태를 상단에 표시
+        if self.calib_px_per_mm:
+            calib_label = f"보정: {self.calib_px_per_mm:.3f} px/mm"
+            calib_fill = (255, 214, 0)
+        else:
+            calib_label = "미보정"
+            calib_fill = (80, 80, 255)
+        draw.text((self.view_w + 18, 50), calib_label, font=font_title, fill=calib_fill)
+        dxf_ratio = self._dxf_real_ratio()
+        if dxf_ratio is not None:
+            draw.text((self.view_w + 230, 54), f"도면 {dxf_ratio * 100:.1f}%", font=font_status,
+                      fill=(120, 220, 255) if self._dxf_is_real_size() else (80, 80, 255))
+
+        # 측정 화면 좌상단 경고 (측정값을 믿으면 안 되는 상태를 눈에 띄게 표시)
+        warnings = []
+        if not self.calib_px_per_mm:
+            warnings.append("미보정: 측정값은 px 단위입니다. 캘리브레이션을 하세요.")
+            if self.calib_notice:
+                warnings.append(self.calib_notice)
+        if self.dxf_contours and self.calib_px_per_mm and not self._dxf_is_real_size():
+            warnings.append(f"도면 배율 ≠ 실측 ({dxf_ratio * 100:.1f}%) - 모양 비교용입니다. '도면 실측크기'로 복귀")
+        for i, text in enumerate(warnings):
+            wy = self.cam_y_offset + 10 + i * 24
+            tx1, ty1, tx2, ty2 = draw.textbbox((12, wy), text, font=font_section_warn)
+            draw.rectangle((tx1 - 4, ty1 - 3, tx2 + 4, ty2 + 3), fill=(0, 0, 0))
+            draw.text((12, wy), text, font=font_section_warn, fill=(80, 80, 255))
 
         for title, y_pos in self.section_headers.items():
             draw.text((self.view_w + 20, y_pos + 2), title, font=font_section, fill=self.clr_text_dim)
@@ -815,15 +829,15 @@ class VisionInspector:
         # ── 상태 텍스트 ───────────────────────────
         status_texts = [
             f"모드: {self.btn_labels.get(self.current_mode, self.current_mode)}",
-            f"배율: {self.scale:.2f}x",
-            f"변화: {self.scale - 1.0:+.2f}x",
+            f"보정: {self.calib_px_per_mm:.3f}px/mm" if self.calib_px_per_mm else "보정: 미보정",
+            f"도면배율: {self.scale:.3f}px/mm",
             f"회전: {self.angle:.1f}°",
             f"측정: {len(self.measurements)}개",
             f"십자선: {len(self.crosshairs)}개",
             f"십자선크기: {self.cross_size:.2f}x",
             f"카메라: {self.current_cam_idx}",
             f"상태: {'정지' if self.is_frozen else '라이브'}",
-            f"저울: {self.scale_error[:24] if self.scale_error else ('연결' if self.scale_connected else '시뮬레이션')}",
+            f"저울: {self.scale_error[:24] if self.scale_error else ('연결' if self.scale_connected else '미연결')}",
             f"도형: {len(self.dxf_contours)}개",
             f"저장: {len(self.weight_log)}건",
         ]
@@ -838,6 +852,34 @@ class VisionInspector:
             self._draw_camera_list(display_img, draw, font_section, font_status)
 
         return np.array(img_pil)
+
+    # ──────────────────────────────────────────────
+    # 측정 기준 (캘리브레이션)
+    # ──────────────────────────────────────────────
+    def _measure_text(self, px_len):
+        """픽셀 길이를 측정 표시 문자열로 변환. 미보정이면 mm로 속이지 않고 px로 표시"""
+        if self.calib_px_per_mm:
+            return f"{px_len / self.calib_px_per_mm:.3f}mm"
+        return f"{px_len:.1f}px (NO CAL)"   # cv2.putText는 구버전에서 한글이 깨지므로 영문 표기
+
+    def _reset_calibration(self, reason):
+        """영상 조건이 바뀌어 기존 캘리브레이션을 믿을 수 없을 때 초기화"""
+        had_calib = self.calib_px_per_mm is not None
+        self.calib_px_per_mm = None
+        self.fixed_calib_line = None
+        self.calib_temp_data = None
+        if had_calib:
+            self.calib_notice = f"{reason} 캘리브레이션이 초기화되었습니다."
+
+    def _dxf_real_ratio(self):
+        """도면 표시 배율 / 측정 기준 (1.0 = 실제 치수). 미보정이거나 도면이 없으면 None"""
+        if not self.calib_px_per_mm or not self.dxf_contours:
+            return None
+        return self.scale / self.calib_px_per_mm
+
+    def _dxf_is_real_size(self):
+        ratio = self._dxf_real_ratio()
+        return ratio is None or abs(ratio - 1.0) < 1e-6
 
     def _select_last_crosshair(self):
         """마지막 십자선을 선택 대상으로 고정"""
@@ -879,10 +921,11 @@ class VisionInspector:
 
     def draw_crosshair(self, canvas):
         """십자선 오버레이 - 배치된 십자선 + CROSS 모드 미리보기"""
-        # 수평 13mm, 수직 5mm (self.scale = px/mm)
+        # 수평 13mm, 수직 5mm (측정 기준 px/mm, 미보정이면 도면 배율 사용)
         # CROSS 모드에서는 크기 배율을 별도로 두어 휠로 즉시 조절 가능
-        H_ARM = 6.5 * self.scale * self.cross_size   # 수평 반길이 (px)
-        V_ARM = 2.5 * self.scale * self.cross_size   # 수직 반길이 (px)
+        px_per_mm = self.calib_px_per_mm or self.scale
+        H_ARM = 6.5 * px_per_mm * self.cross_size   # 수평 반길이 (px)
+        V_ARM = 2.5 * px_per_mm * self.cross_size   # 수직 반길이 (px)
 
         def _draw_one(img, cx, cy, angle_deg, color, label=None):
             rad = np.radians(angle_deg)
@@ -934,17 +977,15 @@ class VisionInspector:
         with self.scale_lock:
             w_val = self.scale_weight
 
-        weight_str = f"{w_val:.2f} g" if w_val is not None else "-- g"
+        # 연결되지 않았으면 값이 남아 있어도 표시하지 않음
+        weight_str = f"{w_val:.2f} g" if (self.scale_connected and w_val is not None) else "-- g"
 
         if self.scale_connected:
             border_rgb = (0, 200, 100)
             tag = self.scale_com_port or "COM"
-        elif self.scale_simulating:
-            border_rgb = (255, 180, 0)
-            tag = "SIM"
         else:
             border_rgb = (120, 120, 120)
-            tag = "---"
+            tag = "미연결"
 
         # 박스 크기·위치 (카메라 원본 해상도 기준)
         box_w, box_h = 220, 70
@@ -1085,7 +1126,7 @@ class VisionInspector:
                 else:
                     self.measurements.append((
                         self.measure_p1, self.measure_p2,
-                        self.measure_temp_val / self.scale,
+                        self._measure_text(self.measure_temp_val),   # 측정 시점 기준으로 확정된 값
                         self.current_mode, (rx, ry)
                     ))
                     self.measure_p1 = None
@@ -1163,8 +1204,11 @@ class VisionInspector:
                     root.attributes("-topmost", True)
                     val = simpledialog.askfloat("캘리브레이션", "실제 길이(mm)를 입력하세요:", parent=root)
                     root.destroy()
-                    if val:
-                        self.scale = dist_px / val
+                    if val and val > 0:
+                        # 측정 기준을 정하고, 도면도 실제 치수 크기로 맞춤
+                        self.calib_px_per_mm = dist_px / val
+                        self.scale = self.calib_px_per_mm
+                        self.calib_notice = ""
                         self.calib_temp_data = (calib_start, calib_end, val)
             self.is_dragging = False
             if self.current_mode not in ['PAN', 'ZOOM', 'ROTATE']:
@@ -1178,7 +1222,10 @@ class VisionInspector:
             if self.loaded_frame is not None:
                 self.loaded_frame = None
                 self.is_frozen = False
+                self._reset_calibration("사진에서 라이브로 돌아와")
             elif not self.is_frozen:
+                if self.cap is None:   # 카메라 전환 중
+                    return
                 ret, frame = self.cap.read()
                 if ret:
                     self.frozen_frame = frame.copy()
@@ -1248,6 +1295,12 @@ class VisionInspector:
             if path:
                 self.load_dxf_action(path)
 
+        elif m == 'DXF_REAL':
+            if self.calib_px_per_mm:
+                self.scale = self.calib_px_per_mm
+            else:
+                messagebox.showinfo("도면 실측크기", "먼저 캘리브레이션을 해야 도면을 실제 치수로 표시할 수 있습니다.")
+
         elif m == 'CLEAR':
             self.measurements = []
             self.measure_p1 = None
@@ -1264,7 +1317,7 @@ class VisionInspector:
                 if not SERIAL_AVAILABLE:
                     messagebox.showinfo(
                         "저울 연결",
-                        "현재 시뮬레이션 모드입니다.\n\n"
+                        "저울이 연결되어 있지 않습니다.\n\n"
                         "실제 저울 연결 방법:\n"
                         "1. pip install pyserial\n"
                         "2. 저울 RS-232 → USB 변환 케이블 연결\n"
@@ -1337,6 +1390,7 @@ class VisionInspector:
             else:
                 ret, frame = self.cap.read()
                 if not ret:
+                    cv2.waitKey(1)   # 카메라가 끊겨도 창이 '응답 없음'으로 굳지 않게 이벤트 처리
                     continue
 
             canvas = frame.copy()
@@ -1370,7 +1424,7 @@ class VisionInspector:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
 
             # ── 측정선 ────────────────────────────
-            for m1, m2, val, m_type, pt in self.measurements:
+            for m1, m2, val_text, m_type, pt in self.measurements:
                 p1 = (int(m1[0]), int(m1[1]))
                 p2 = (int(m2[0]), int(m2[1]))
                 if m_type == 'MEAS_HV':
@@ -1382,7 +1436,7 @@ class VisionInspector:
                         p2 = (p1[0], p2[1])
                 else:
                     cv2.line(canvas, p1, p2, meas_clr, 1)
-                cv2.putText(canvas, f"{val:.3f}mm", (int(pt[0]), int(pt[1])),
+                cv2.putText(canvas, val_text, (int(pt[0]), int(pt[1])),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
 
             x_ratio, y_ratio = self._get_frame_ratios(frame)
@@ -1406,14 +1460,14 @@ class VisionInspector:
                 cv2.line(canvas, p1, p2, meas_clr, 1)
                 cv2.circle(canvas, p1, 5, meas_clr, 1)
                 cv2.circle(canvas, p2, 3, meas_clr, 1)
-                preview_len = np.linalg.norm(np.array(p1) - np.array(p2)) / self.scale
-                cv2.putText(canvas, f"{preview_len:.3f}mm",
+                preview_len = np.linalg.norm(np.array(p1) - np.array(p2))
+                cv2.putText(canvas, self._measure_text(preview_len),
                             (max(10, p2[0]), max(10, p2[1])),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, meas_clr, 1)
             elif self.measure_p2:
                 cx = int(self.curr_mx * x_ratio)
                 cy = int((self.curr_my - self.cam_y_offset) * y_ratio)
-                cv2.putText(canvas, f"{self.measure_temp_val / self.scale:.3f}mm",
+                cv2.putText(canvas, self._measure_text(self.measure_temp_val),
                             (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
             elif self.measure_p1:
                 cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 1)
