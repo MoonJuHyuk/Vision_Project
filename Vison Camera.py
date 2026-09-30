@@ -26,6 +26,14 @@ class VisionInspector:
         self.current_cam_idx = 0
         self.cap = self.auto_scan_and_connect(0)
         if self.cap is None:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(
+                "카메라 오류",
+                "사용 가능한 카메라를 찾을 수 없습니다.\n\n"
+                "카메라 연결 상태를 확인하고, 다른 프로그램이 카메라를 사용 중이면 종료한 뒤 다시 실행하세요."
+            )
+            root.destroy()
             sys.exit()
         self.camera_switching = False
         self.pending_camera = None
@@ -471,6 +479,18 @@ class VisionInspector:
             messagebox.showerror("사진 불러오기 실패", "이미지 파일을 읽을 수 없습니다.")
             return
 
+        # 화면(카메라) 비율과 다른 사진은 가로·세로가 다르게 늘어나 보이므로 검은 여백을 붙여 비율을 맞춤
+        h, w = image.shape[:2]
+        target_ratio = self.cam_w / max(1, self.cam_h)
+        if w / h > target_ratio:
+            pad = int(round(w / target_ratio)) - h
+            image = cv2.copyMakeBorder(image, pad // 2, pad - pad // 2, 0, 0,
+                                       cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        elif w / h < target_ratio:
+            pad = int(round(h * target_ratio)) - w
+            image = cv2.copyMakeBorder(image, 0, 0, pad // 2, pad - pad // 2,
+                                       cv2.BORDER_CONSTANT, value=(0, 0, 0))
+
         self.loaded_frame = image
         self.is_frozen = False
         self.frozen_frame = None
@@ -831,11 +851,9 @@ class VisionInspector:
         return idx
 
     def _apply_crosshair_zoom(self, delta_size):
-        """선택된 십자선의 크기를 조절. 상한을 제거해 무제한 확대가 가능하게 함"""
-        if self.crosshairs:
-            idx = self.cross_selected_idx if self.cross_selected_idx is not None else self._select_last_crosshair()
-            if idx is None or not (0 <= idx < len(self.crosshairs)):
-                return
+        """선택된 십자선이 있으면 그 크기를, 없으면 도면 배율을 조절"""
+        idx = self.cross_selected_idx
+        if idx is not None and 0 <= idx < len(self.crosshairs):
             px, py, pangle, psize = self.crosshairs[idx]
             new_size = max(0.2, psize + delta_size)
             self.crosshairs[idx] = (px, py, pangle, new_size)
@@ -844,16 +862,14 @@ class VisionInspector:
             self.cross_edit_idx = idx
             return
 
-        self.scale = max(0.05, self.scale + delta_size * 0.08)
-        self.cross_size = max(0.2, self.cross_size + delta_size)
+        # 배율에 비례해 변하도록 곱셈 방식 사용 (휠 한 칸 = 약 15%)
+        self.scale = max(0.05, self.scale * 1.15 ** (delta_size / 0.35))
 
     def _apply_crosshair_rotation(self, delta_deg):
-        """선택된 십자선의 각도를 조절"""
-        if not self.crosshairs:
-            self.angle = (self.angle + delta_deg) % 360
-            return
-        idx = self.cross_selected_idx if self.cross_selected_idx is not None else self._select_last_crosshair()
+        """선택된 십자선이 있으면 그 각도를, 없으면 도면 각도를 조절"""
+        idx = self.cross_selected_idx
         if idx is None or not (0 <= idx < len(self.crosshairs)):
+            self.angle = (self.angle + delta_deg) % 360
             return
         px, py, pangle, psize = self.crosshairs[idx]
         new_angle = (pangle + delta_deg) % 360
@@ -1046,12 +1062,9 @@ class VisionInspector:
                         if dist < best_dist:
                             best_dist = dist
                             best_idx = idx
-                    if best_idx is not None:
-                        self.cross_selected_idx = best_idx
-                        self.cross_edit_idx = best_idx
-                    else:
-                        self.cross_selected_idx = len(self.crosshairs) - 1
-                        self.cross_edit_idx = len(self.crosshairs) - 1
+                    # 십자선 근처를 누르면 십자선 편집, 빈 곳을 누르면 도면 편집
+                    self.cross_selected_idx = best_idx
+                    self.cross_edit_idx = best_idx
                 return
             if self.current_mode == 'CROSS':
                 self.crosshairs.append((rx, ry, self.cross_angle, self.cross_size))
@@ -1109,8 +1122,8 @@ class VisionInspector:
                         self.offset_x += dx
                         self.offset_y += dy
                 elif self.current_mode == 'ZOOM':
-                    if self.crosshairs and x <= self.view_w:
-                        idx = self.cross_edit_idx if self.cross_edit_idx is not None else (len(self.crosshairs) - 1)
+                    if self.cross_edit_idx is not None and x <= self.view_w:
+                        idx = self.cross_edit_idx
                         if 0 <= idx < len(self.crosshairs):
                             px, py, pangle, psize = self.crosshairs[idx]
                             factor = 1.0 - (y - self.lmy) * 0.005
@@ -1126,8 +1139,8 @@ class VisionInspector:
                         self.scale *= (1 - (y - self.lmy) * 0.005)
                         self.scale = max(0.05, self.scale)
                 elif self.current_mode == 'ROTATE':
-                    if self.crosshairs and x <= self.view_w:
-                        idx = self.cross_edit_idx if self.cross_edit_idx is not None else (len(self.crosshairs) - 1)
+                    if self.cross_edit_idx is not None and x <= self.view_w:
+                        idx = self.cross_edit_idx
                         if 0 <= idx < len(self.crosshairs):
                             px, py, pangle, psize = self.crosshairs[idx]
                             new_angle = (pangle + (x - self.lmx) * 0.2) % 360
@@ -1138,7 +1151,12 @@ class VisionInspector:
 
         if event == cv2.EVENT_LBUTTONUP:
             if self.is_dragging and self.current_mode == 'CALIB' and self.calib_p1:
-                dist_px = np.linalg.norm(np.array(self.calib_p1) - np.array([rx, ry]))
+                # 입력창이 떠 있는 동안 마우스 이벤트가 다시 들어와 calib_p1을 지울 수 있으므로
+                # 시작/끝점을 먼저 따로 저장하고 드래그 상태를 정리한 뒤 입력창을 띄움
+                calib_start, calib_end = self.calib_p1, (rx, ry)
+                self.is_dragging = False
+                self.calib_p1 = self.calib_p2 = None
+                dist_px = np.linalg.norm(np.array(calib_start) - np.array(calib_end))
                 if dist_px > 10:
                     root = tk.Tk()
                     root.withdraw()
@@ -1147,7 +1165,7 @@ class VisionInspector:
                     root.destroy()
                     if val:
                         self.scale = dist_px / val
-                        self.calib_temp_data = (self.calib_p1, (rx, ry), val)
+                        self.calib_temp_data = (calib_start, calib_end, val)
             self.is_dragging = False
             if self.current_mode not in ['PAN', 'ZOOM', 'ROTATE']:
                 self.cross_edit_idx = None
@@ -1300,8 +1318,10 @@ class VisionInspector:
         cv2.namedWindow('Vision Inspector', cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback('Vision Inspector', self.mouse_callback)
 
+        window_shown = False
         while self.is_running:
-            if cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1:
+            # 창이 처음 그려지기 전에는 '닫힘'으로 잘못 판단될 수 있어 첫 표시 이후에만 확인
+            if window_shown and cv2.getWindowProperty('Vision Inspector', cv2.WND_PROP_VISIBLE) < 1:
                 break
 
             self._apply_pending_camera()
@@ -1424,6 +1444,7 @@ class VisionInspector:
             display_img = self.draw_ui(display_img)
 
             cv2.imshow('Vision Inspector', display_img)
+            window_shown = True
             if cv2.waitKey(1) == ord('q'):
                 break
 
