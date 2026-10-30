@@ -44,7 +44,10 @@ class VisionInspector:
         self.is_frozen = False
         self.frozen_frame = None
         self.loaded_frame = None
-        self.last_full_canvas = None
+        self.last_frame = None            # 마지막으로 화면에 표시한 원본 프레임 (경계 맞춤·저장용)
+        self.edge_snap = True             # 측정/캘리브 점을 가까운 경계에 자동으로 맞춤
+        self.view_dragging = False        # 오른쪽 버튼으로 영상 이동 중
+        self._font_cache = {}
         self.view_w, self.ui_w = 1200, 340
         self.total_w = self.view_w + self.ui_w
 
@@ -99,13 +102,17 @@ class VisionInspector:
             'SCALE_CONNECT': '저울 연결',
             'SCALE_SAVE': '무게 저장',
             'SAVE_IMG': '이미지 저장',
+            'CAM_SETTINGS': '카메라 설정',
+            'VIEW_FIT': '화면 맞춤',
+            'EDGE_SNAP': '경계 맞춤',
             'QUIT': '종료'
         }
 
         self.button_sections = [
             {
                 'title': '카메라 제어',
-                'buttons': [['SWITCH_CAM', 'FREEZE_LIVE'], ['LOAD_IMAGE', 'SAVE_IMG']]
+                'buttons': [['SWITCH_CAM', 'FREEZE_LIVE'], ['LOAD_IMAGE', 'SAVE_IMG'],
+                            ['CAM_SETTINGS', 'VIEW_FIT']]
             },
             {
                 'title': '도면 관리',
@@ -125,7 +132,8 @@ class VisionInspector:
                 'title': '측정 도구',
                 'buttons': [
                     ['MEAS_P2P', 'MEAS_HV'],
-                    ['MEAS_COLOR', 'MEAS_UNDO']
+                    ['MEAS_COLOR', 'MEAS_UNDO'],
+                    ['EDGE_SNAP']
                 ]
             },
             {
@@ -135,11 +143,8 @@ class VisionInspector:
             {
                 'title': '정밀저울',
                 'buttons': [['SCALE_CONNECT', 'SCALE_SAVE']]
-            },
-            {
-                'title': '시스템',
-                'buttons': [['QUIT']]
             }
+            # '종료' 버튼은 화면에 들어갈 자리가 없어 제외 (창 X 버튼 또는 q 키로 종료)
         ]
 
         self.current_mode = 'PAN'
@@ -322,6 +327,8 @@ class VisionInspector:
         self.cam_display_h = int(self.cam_h * (self.view_w / self.cam_w))
         self.view_h = max(900, self.cam_display_h)
         self.cam_y_offset = (self.view_h - self.cam_display_h) // 2
+        self.frame_w, self.frame_h = w, h
+        self._reset_view()
 
     def auto_scan_and_connect(self, start_idx):
         for i in range(start_idx, start_idx + 6):
@@ -332,22 +339,43 @@ class VisionInspector:
                 return tmp_cap
         return None
 
-    @staticmethod
-    def _open_camera(idx):
-        """카메라 하나만 열고 첫 프레임이 정상인지 확인"""
+    MIN_LIVE_FPS = 8   # 최대 해상도에서 이보다 느리면 1920x1080으로 되돌림
+
+    @classmethod
+    def _open_camera(cls, idx):
+        """카메라를 열고 가장 높은 해상도로 설정한 뒤 첫 프레임이 정상인지 확인"""
         tmp_cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
         if not tmp_cap.isOpened():
             tmp_cap.release()
             return None
-
-        tmp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        tmp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        cls._apply_max_resolution(tmp_cap)
         ret, frame = tmp_cap.read()
         if ret and frame is not None:
             return tmp_cap
-
         tmp_cap.release()
         return None
+
+    @classmethod
+    def _apply_max_resolution(cls, cap):
+        """지원하지 않는 큰 값(9999x9999)을 요청하면 OpenCV(DirectShow)가 카메라가 지원하는
+        가장 큰 해상도를 골라줌. 해상도 변경은 한 번에 수 초가 걸려 여러 번 시도하지 않음"""
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 9999)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 9999)
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.shape[1] <= 1920:
+            return
+        # 최대 해상도에서 영상이 너무 느리거나 안 나오면 1920x1080으로
+        if ret and frame is not None:
+            import time
+            t0 = time.time()
+            n = 0
+            while n < 5 and cap.read()[0]:
+                n += 1
+            fps = n / max(time.time() - t0, 1e-3)
+            if n == 5 and fps >= cls.MIN_LIVE_FPS:
+                return
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
     @staticmethod
     def _get_camera_names():
@@ -484,11 +512,6 @@ class VisionInspector:
         self.is_frozen = False
         self.frozen_frame = None
         self._reset_calibration("사진을 불러와")
-
-    def _get_frame_ratios(self, frame):
-        """현재 프레임을 화면 좌표로 변환할 때 사용할 가로·세로 비율"""
-        frame_h, frame_w = frame.shape[:2]
-        return frame_w / self.view_w, frame_h / max(1, self.cam_display_h)
 
     # ──────────────────────────────────────────────
     # DXF 로딩 (핵심 수정 부분)
@@ -657,12 +680,13 @@ class VisionInspector:
     # UI
     # ──────────────────────────────────────────────
     def init_buttons(self):
-        btn_h = 30
+        # 버튼이 모두 들어가도록 간격을 촘촘하게 (높이 900 기준 하단 확대경 영역 위까지)
+        btn_h = 28
         margin_x = 8
-        margin_y = 5
-        section_h = 18
-        section_gap = 8
-        start_y = 65
+        margin_y = 4
+        section_h = 16
+        section_gap = 4
+        start_y = 68
 
         col_w = (self.ui_w - 30 - margin_x) // 2
         max_button_y = self.view_h - self.bottom_area_height - 10
@@ -697,7 +721,7 @@ class VisionInspector:
 
         # 버튼
         for mode, (x1, y1, x2, y2) in self.buttons.items():
-            is_active  = (mode == self.current_mode)
+            is_active  = (mode == self.current_mode) or (mode == 'EDGE_SNAP' and self.edge_snap)
             is_hovered = (mode == self.hovered_button)
             is_pressed = (mode == self.pressed_button)
 
@@ -720,9 +744,9 @@ class VisionInspector:
         cv2.rectangle(display_img, (self.view_w, bottom_start_y), (self.total_w, self.view_h), self.clr_section, -1)
         cv2.line(display_img, (self.view_w, bottom_start_y), (self.total_w, bottom_start_y), self.clr_border, 2)
 
-        # 확대경
-        mag_size = 150
-        mag_y1 = bottom_start_y + 20
+        # 확대경 (마우스 주변 원본 픽셀을 그대로 크게 보여줌)
+        mag_size = 140
+        mag_y1 = bottom_start_y + 16
         mag_y2 = mag_y1 + mag_size
         mag_x1 = self.view_w + (self.ui_w - mag_size) // 2
         mag_x2 = mag_x1 + mag_size
@@ -732,70 +756,57 @@ class VisionInspector:
 
         if (self.curr_mx < self.view_w and
                 self.cam_y_offset <= self.curr_my < self.cam_y_offset + self.cam_display_h and
-                self.last_full_canvas is not None):
-
-            src_h, src_w = self.last_full_canvas.shape[:2]
-
-            x_ratio = src_w / max(1, self.view_w)
-            y_ratio = src_h / max(1, self.cam_display_h)
-
-            rx = int(self.curr_mx * x_ratio)
-            ry = int((self.curr_my - self.cam_y_offset) * y_ratio)
-
-            rx = max(0, min(rx, src_w - 1))
-            ry = max(0, min(ry, src_h - 1))
-
-            roi_s = 30
-            y1c = max(0, ry - roi_s)
-            y2c = min(src_h, ry + roi_s)
-            x1c = max(0, rx - roi_s)
-            x2c = min(src_w, rx + roi_s)
-
-            roi = self.last_full_canvas[y1c:y2c, x1c:x2c]
-
-            if roi is not None and roi.size > 0:
-                roi_res = cv2.resize(
-                    roi,
-                    (mag_size, mag_size),
-                    interpolation=cv2.INTER_NEAREST
-                )
-
-                display_img[mag_y1:mag_y2, mag_x1:mag_x2] = roi_res
-
-                cx_m = mag_x1 + mag_size // 2
-                cy_m = mag_y1 + mag_size // 2
-                cv2.line(display_img, (cx_m, mag_y1),
-                         (cx_m, mag_y2), (0, 255, 0), 1)
-                cv2.line(display_img, (mag_x1, cy_m),
-                         (mag_x2, cy_m), (0, 255, 0), 1)
+                self.last_frame is not None):
+            fx, fy = self._s2f(self.curr_mx, self.curr_my)
+            # 확대경 배율: 큰 화면보다 항상 3배 더 크게 (최소 원본 1픽셀 = 4.7픽셀, 최대 40픽셀)
+            k = float(np.clip(3.0 * self._view_scale(), mag_size / 30.0, 40.0))
+            m = np.array([[k, 0, mag_size / 2.0 - fx * k],
+                          [0, k, mag_size / 2.0 - fy * k]])
+            mag_img = cv2.warpAffine(
+                self.last_frame, m, (mag_size, mag_size), flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+            # 십자선·측정선·도면·경계 맞춤 미리보기도 큰 화면과 똑같이 표시
+            to_mag = lambda p: (np.asarray(p, dtype=np.float64) - [fx, fy]) * k + [mag_size / 2.0, mag_size / 2.0]
+            self._draw_overlays(mag_img, to_mag, unit=1.0, live=True)
+            display_img[mag_y1:mag_y2, mag_x1:mag_x2] = mag_img
+            # 마우스 위치 표시: 십자선과 헷갈리지 않고 가운데를 가리지 않도록 가장자리 짧은 표시만
+            cx_m = mag_x1 + mag_size // 2
+            cy_m = mag_y1 + mag_size // 2
+            tick, gap = 18, 6
+            for (ax, ay, bx, by) in ((cx_m, mag_y1, cx_m, mag_y1 + tick), (cx_m, mag_y2 - tick, cx_m, mag_y2),
+                                     (mag_x1, cy_m, mag_x1 + tick, cy_m), (mag_x2 - tick, cy_m, mag_x2, cy_m),
+                                     (cx_m - gap, cy_m, cx_m - 2, cy_m), (cx_m + 2, cy_m, cx_m + gap, cy_m)):
+                cv2.line(display_img, (ax, ay), (bx, by), (0, 255, 0), 1)
 
         # PIL 텍스트
         img_pil = Image.fromarray(display_img)
         draw = ImageDraw.Draw(img_pil)
 
-        try:
-            font_title  = ImageFont.truetype("malgunbd.ttf", 16)
-            font_section = ImageFont.truetype("malgun.ttf",  10)
-            font_btn    = ImageFont.truetype("malgun.ttf",   10)
-            font_status = ImageFont.truetype("malgun.ttf",    9)
-            font_section_warn = ImageFont.truetype("malgunbd.ttf", 14)
-        except Exception:
-            font_title = font_section = font_btn = font_status = font_section_warn = ImageFont.load_default()
+        font_title = self._font("malgunbd.ttf", 16)
+        font_section = self._font("malgun.ttf", 10)
+        font_btn = self._font("malgun.ttf", 10)
+        font_status = self._font("malgun.ttf", 9)
+        font_section_warn = self._font("malgunbd.ttf", 14)
 
-        draw.text((self.view_w + 20, 12), "VISION MEASUREMENT", font=font_title,  fill=(204, 122, 0))
-        draw.text((self.view_w + 20, 32), "SYSTEM v2.1",        font=font_status, fill=self.clr_text_dim)
+        draw.text((self.view_w + 20, 8), "VISION MEASUREMENT", font=font_title,  fill=(204, 122, 0))
+        draw.text((self.view_w + 20, 28), "SYSTEM v2.2",        font=font_status, fill=self.clr_text_dim)
 
-        # 측정 기준(캘리브레이션)과 도면 배율 상태를 상단에 표시
+        # 측정 기준(캘리브레이션), 분해능, 도면 배율 상태를 상단에 표시
         if self.calib_px_per_mm:
             calib_label = f"보정: {self.calib_px_per_mm:.3f} px/mm"
             calib_fill = (255, 214, 0)
         else:
             calib_label = "미보정"
             calib_fill = (80, 80, 255)
-        draw.text((self.view_w + 18, 50), calib_label, font=font_title, fill=calib_fill)
+        draw.text((self.view_w + 18, 44), calib_label, font=font_section_warn, fill=calib_fill)
+        if self.calib_px_per_mm:
+            mm_per_px = 1.0 / self.calib_px_per_mm
+            # 0.1mm를 믿고 판정하려면 1픽셀이 0.02mm 이하여야 함 (공차의 1/5)
+            draw.text((self.view_w + 200, 47), f"1px = {mm_per_px:.4f}mm", font=font_status,
+                      fill=(120, 220, 120) if mm_per_px <= 0.02 else (80, 80, 255))
         dxf_ratio = self._dxf_real_ratio()
         if dxf_ratio is not None:
-            draw.text((self.view_w + 230, 54), f"도면 {dxf_ratio * 100:.1f}%", font=font_status,
+            draw.text((self.view_w + 200, 30), f"도면 {dxf_ratio * 100:.1f}%", font=font_status,
                       fill=(120, 220, 255) if self._dxf_is_real_size() else (80, 80, 255))
 
         # 측정 화면 좌상단 경고 (측정값을 믿으면 안 되는 상태를 눈에 띄게 표시)
@@ -816,7 +827,7 @@ class VisionInspector:
             draw.text((self.view_w + 20, y_pos + 2), title, font=font_section, fill=self.clr_text_dim)
 
         for mode, (x1, y1, x2, y2) in self.buttons.items():
-            is_active  = (mode == self.current_mode)
+            is_active  = (mode == self.current_mode) or (mode == 'EDGE_SNAP' and self.edge_snap)
             is_hovered = (mode == self.hovered_button)
             is_pressed = (mode == self.pressed_button)
             if is_pressed or is_active or is_hovered:
@@ -824,29 +835,38 @@ class VisionInspector:
             else:
                 txt_fill = (200, 200, 200)
             label = self.btn_labels.get(mode, mode)
-            draw.text((x1 + 8, y1 + 8), label, font=font_btn, fill=txt_fill)
+            if mode == 'EDGE_SNAP':
+                label = f"경계 맞춤: {'켬' if self.edge_snap else '끔'}  (E)"
+            draw.text((x1 + 8, y1 + 7), label, font=font_btn, fill=txt_fill)
 
         # ── 상태 텍스트 ───────────────────────────
+        if self.loaded_frame is not None:
+            source = "사진"
+        else:
+            source = '정지' if self.is_frozen else '라이브'
         status_texts = [
             f"모드: {self.btn_labels.get(self.current_mode, self.current_mode)}",
-            f"보정: {self.calib_px_per_mm:.3f}px/mm" if self.calib_px_per_mm else "보정: 미보정",
+            f"상태: {source} (카메라 {self.current_cam_idx})",
+            f"해상도: {self.frame_w}x{self.frame_h}",
+            f"영상 확대: {self.view_zoom:.1f}배",
             f"도면배율: {self.scale:.3f}px/mm",
             f"회전: {self.angle:.1f}°",
             f"측정: {len(self.measurements)}개",
             f"십자선: {len(self.crosshairs)}개",
-            f"십자선크기: {self.cross_size:.2f}x",
-            f"카메라: {self.current_cam_idx}",
-            f"상태: {'정지' if self.is_frozen else '라이브'}",
             f"저울: {self.scale_error[:24] if self.scale_error else ('연결' if self.scale_connected else '미연결')}",
-            f"도형: {len(self.dxf_contours)}개",
             f"저장: {len(self.weight_log)}건",
         ]
-        y_pos = mag_y2 + 15
+        y_pos = mag_y2 + 10
         for i, text in enumerate(status_texts):
             col = self.view_w + 20 if i % 2 == 0 else self.view_w + 180
             draw.text((col, y_pos), text, font=font_status, fill=self.clr_text_dim)
             if i % 2 == 1:
-                y_pos += 16
+                y_pos += 15
+
+        # ── 영상 조작 안내 (영상 아래 여백) ──
+        hint = "휠: 영상 확대/축소   오른쪽 버튼 드래그: 영상 이동   오른쪽 더블클릭 / F: 화면 맞춤   E: 경계 맞춤 켬/끔"
+        hy = min(self.view_h - 20, self.cam_y_offset + self.cam_display_h + 6)
+        draw.text((12, hy), hint, font=font_status, fill=self.clr_text_dim)
 
         if self.camera_list_visible:
             self._draw_camera_list(display_img, draw, font_section, font_status)
@@ -880,6 +900,161 @@ class VisionInspector:
     def _dxf_is_real_size(self):
         ratio = self._dxf_real_ratio()
         return ratio is None or abs(ratio - 1.0) < 1e-6
+
+    # ──────────────────────────────────────────────
+    # 영상 확대/이동 (화면 좌표 ↔ 원본 프레임 좌표)
+    #   frame 좌표: 카메라 원본 픽셀 (측정·캘리브는 모두 이 좌표로 계산)
+    #   화면 좌표 = (frame 좌표 - 화면중심의 frame 좌표) × 배율 + 화면중심
+    # ──────────────────────────────────────────────
+    MAX_SCREEN_PX_PER_FRAME_PX = 20.0   # 최대 확대: 원본 1픽셀이 화면 20픽셀
+
+    def _reset_view(self):
+        """영상 확대를 처음(전체 보기) 상태로"""
+        self.view_zoom = 1.0
+        self.view_cx = self.frame_w / 2.0
+        self.view_cy = self.frame_h / 2.0
+
+    def _view_scale(self):
+        """원본 1픽셀이 화면 몇 픽셀인지"""
+        return self.view_w / self.frame_w * self.view_zoom
+
+    def _clamp_view(self):
+        """확대한 영상이 화면 밖으로 벗어나지 않도록 중심 위치를 제한"""
+        s = self._view_scale()
+        half_w = self.view_w / (2 * s)
+        half_h = self.cam_display_h / (2 * s)
+        if half_w * 2 >= self.frame_w:
+            self.view_cx = self.frame_w / 2.0
+        else:
+            self.view_cx = min(max(self.view_cx, half_w), self.frame_w - half_w)
+        if half_h * 2 >= self.frame_h:
+            self.view_cy = self.frame_h / 2.0
+        else:
+            self.view_cy = min(max(self.view_cy, half_h), self.frame_h - half_h)
+
+    def _s2f(self, x, y):
+        """창 좌표(마우스) → 원본 프레임 좌표"""
+        s = self._view_scale()
+        return ((x - self.view_w / 2.0) / s + self.view_cx,
+                (y - self.cam_y_offset - self.cam_display_h / 2.0) / s + self.view_cy)
+
+    def _f2s_arr(self, pts):
+        """원본 프레임 좌표 배열 (N,2) → 영상 표시 영역 좌표 배열"""
+        s = self._view_scale()
+        pts = np.asarray(pts, dtype=np.float64)
+        return (pts - [self.view_cx, self.view_cy]) * s + [self.view_w / 2.0, self.cam_display_h / 2.0]
+
+    def _zoom_view_at(self, x, y, factor):
+        """마우스 위치를 기준으로 영상 확대/축소 (마우스 아래 지점이 그대로 유지됨)"""
+        fx, fy = self._s2f(x, y)
+        max_zoom = self.MAX_SCREEN_PX_PER_FRAME_PX * self.frame_w / self.view_w
+        self.view_zoom = min(max(self.view_zoom * factor, 1.0), max(1.0, max_zoom))
+        s = self._view_scale()
+        self.view_cx = fx - (x - self.view_w / 2.0) / s
+        self.view_cy = fy - (y - self.cam_y_offset - self.cam_display_h / 2.0) / s
+        self._clamp_view()
+
+    def _render_view(self, frame):
+        """원본 프레임에서 현재 확대 영역을 잘라 화면 크기 영상으로 만듦 (좌표 계산과 정확히 일치)"""
+        s = self._view_scale()
+        src, k = frame, 1.0
+        # 많이 축소할 때는 피라미드 축소로 계단 현상을 줄임 (pyrDown은 정확히 1/2 배율)
+        while (s * k * 2 <= 1.0 and src.shape[0] % 2 == 0 and src.shape[1] % 2 == 0
+               and min(src.shape[:2]) > 64):
+            src = cv2.pyrDown(src)
+            k *= 2
+        m = np.array([[k * s, 0, self.view_w / 2.0 - self.view_cx * s],
+                      [0, k * s, self.cam_display_h / 2.0 - self.view_cy * s]], dtype=np.float64)
+        # 크게 확대하면 원본 픽셀이 네모로 보이게 해 실제 경계 위치를 판단하기 쉽게 함
+        interp = cv2.INTER_NEAREST if s >= 2.0 else cv2.INTER_LINEAR
+        return cv2.warpAffine(src, m, (self.view_w, self.cam_display_h), flags=interp,
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+
+    # ──────────────────────────────────────────────
+    # 경계 자동 맞춤 (서브픽셀)
+    # ──────────────────────────────────────────────
+    EDGE_MIN_STRENGTH = 40.0   # 이보다 약한 밝기 변화는 경계로 보지 않음 (흐린 노이즈 무시)
+
+    def _snap_to_edge(self, fx, fy):
+        """클릭 근처에서 가장 가까운 뚜렷한 경계를 찾아 1픽셀보다 정밀한 위치를 돌려줌.
+        경계를 못 찾으면 None"""
+        frame = self.last_frame
+        if frame is None:
+            return None
+        s = self._view_scale()
+        # 화면 기준 약 8픽셀 범위에서 찾음 (크게 확대해도 흐린 경계 폭을 덮도록 원본 3픽셀 이상)
+        radius = float(np.clip(8.0 / s, 3.0, 40.0))
+        h, w = frame.shape[:2]
+        margin = int(np.ceil(radius)) + 4
+        x0, y0 = max(0, int(fx) - margin), max(0, int(fy) - margin)
+        x1, y1 = min(w, int(fx) + margin + 1), min(h, int(fy) + margin + 1)
+        if x1 - x0 < 7 or y1 - y0 < 7:
+            return None
+
+        roi = frame[y0:y1, x0:x1]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        gray = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 1.0)
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy)
+
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        dist = np.hypot(xx - fx, yy - fy)
+        inside = dist <= radius
+        inside[:2, :] = inside[-2:, :] = False
+        inside[:, :2] = inside[:, -2:] = False
+        if not inside.any():
+            return None
+        peak = float(mag[inside].max())
+        if peak < self.EDGE_MIN_STRENGTH:
+            return None
+
+        def sample(px, py):
+            """mag 이미지에서 실수 좌표 값을 보간해서 읽음"""
+            px = np.clip(px, 0, mag.shape[1] - 1.001)
+            py = np.clip(py, 0, mag.shape[0] - 1.001)
+            ix, iy = np.floor(px).astype(int), np.floor(py).astype(int)
+            ax, ay = px - ix, py - iy
+            return (mag[iy, ix] * (1 - ax) * (1 - ay) + mag[iy, ix + 1] * ax * (1 - ay) +
+                    mag[iy + 1, ix] * (1 - ax) * ay + mag[iy + 1, ix + 1] * ax * ay)
+
+        # 경계 후보: 충분히 강하고, 밝기 변화 방향으로 봤을 때 가장 강한 지점(경계의 한가운데)
+        cy_idx, cx_idx = np.nonzero(inside & (mag >= 0.5 * peak))
+        m0 = mag[cy_idx, cx_idx]
+        dx = gx[cy_idx, cx_idx] / np.maximum(m0, 1e-6)
+        dy = gy[cy_idx, cx_idx] / np.maximum(m0, 1e-6)
+        m_minus = sample(cx_idx - dx, cy_idx - dy)
+        m_plus = sample(cx_idx + dx, cy_idx + dy)
+        is_ridge = (m0 >= m_minus) & (m0 >= m_plus)
+        if not is_ridge.any():
+            return None
+
+        # 그중 클릭한 곳에서 가장 가까운 경계 선택 (경계가 여러 개면 사용자가 찍은 쪽을 따름)
+        cand = np.nonzero(is_ridge)[0]
+        best = cand[np.argmin(dist[cy_idx[cand], cx_idx[cand]])]
+        bx, by = cx_idx[best], cy_idx[best]
+        a, b, c = m_minus[best], m0[best], m_plus[best]
+        denom = a - 2 * b + c
+        t = 0.5 * (a - c) / denom if abs(denom) > 1e-6 else 0.0
+        t = float(np.clip(t, -0.5, 0.5))   # 포물선 꼭짓점 = 서브픽셀 경계 위치
+        return (x0 + bx + t * dx[best], y0 + by + t * dy[best])
+
+    def _maybe_snap(self, fx, fy):
+        """경계 맞춤이 켜져 있으면 경계 위치로, 못 찾으면 클릭 위치 그대로"""
+        if not self.edge_snap:
+            return (fx, fy)
+        snapped = self._snap_to_edge(fx, fy)
+        return snapped if snapped is not None else (fx, fy)
+
+    def _font(self, name, size):
+        """폰트를 매 프레임 다시 읽지 않도록 캐시"""
+        key = (name, size)
+        if key not in self._font_cache:
+            try:
+                self._font_cache[key] = ImageFont.truetype(name, size)
+            except Exception:
+                self._font_cache[key] = ImageFont.load_default()
+        return self._font_cache[key]
 
     def _select_last_crosshair(self):
         """마지막 십자선을 선택 대상으로 고정"""
@@ -919,61 +1094,161 @@ class VisionInspector:
         self.cross_selected_idx = idx
         self.cross_edit_idx = idx
 
-    def draw_crosshair(self, canvas):
+    # ──────────────────────────────────────────────
+    # 오버레이 그리기
+    #   img: 그릴 영상, to_img: 원본 프레임 좌표 (N,2) → img 좌표 변환 함수
+    #   unit: 선 두께·글자 크기 배율 (화면=1, 고해상도 저장 이미지는 더 크게)
+    #   화면에서는 확대해도 선이 1픽셀로 유지되어 경계를 가리지 않음
+    # ──────────────────────────────────────────────
+    SHIFT = 4   # cv2 그리기 좌표를 1/16 픽셀 단위로 넘겨 위치를 정밀하게
+
+    @classmethod
+    def _fix(cls, pts):
+        return np.round(np.asarray(pts) * (1 << cls.SHIFT)).astype(np.int32)
+
+    def _line(self, img, to_img, p1, p2, color, unit):
+        q = self._fix(to_img([p1, p2]))
+        cv2.line(img, tuple(q[0]), tuple(q[1]), color, max(1, int(round(unit))), cv2.LINE_AA, self.SHIFT)
+
+    def _text(self, img, to_img, pt, text, color, unit, scale=0.5):
+        q = to_img([pt])[0]
+        cv2.putText(img, text, (int(q[0]), int(q[1])), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale * unit, color, max(1, int(round(unit))), cv2.LINE_AA)
+
+    def _point_mark(self, img, to_img, pt, color, unit):
+        """측정점 표시 (작은 원 + 중심점) - 경계 맞춤된 위치를 확인할 수 있게"""
+        q = self._fix(to_img([pt]))[0]
+        cv2.circle(img, tuple(q), int(4 * unit) << self.SHIFT, color, max(1, int(round(unit))),
+                   cv2.LINE_AA, self.SHIFT)
+        cv2.circle(img, tuple(q), max(1, int(round(unit))) << self.SHIFT, color, -1,
+                   cv2.LINE_AA, self.SHIFT)
+
+    def _draw_overlays(self, img, to_img, unit=1.0, live=True):
+        """도면, 캘리브레이션 선, 측정선, 십자선을 그림. live=True면 마우스 미리보기도 그림"""
+        rad = np.radians(self.angle)
+        rot_m = np.array([[np.cos(rad), -np.sin(rad)],
+                          [np.sin(rad),  np.cos(rad)]])
+        dxf_clr = self.color_palette[self.idx_dxf_color]
+        meas_clr = self.color_palette[self.idx_meas_color]
+        calib_clr = self.color_palette[self.idx_calib_color]
+        thick = max(1, int(round(unit)))
+
+        # ── DXF 도면 ──
+        cx = self.frame_w / 2.0 + self.offset_x
+        cy = self.frame_h / 2.0 + self.offset_y
+        for ctype, pts in self.dxf_contours:
+            pts_img = self._fix(to_img((pts @ rot_m.T) * self.scale + [cx, cy])).reshape(-1, 1, 2)
+            cv2.polylines(img, [pts_img], ctype == 'poly', dxf_clr, thick, cv2.LINE_AA, self.SHIFT)
+
+        # ── 캘리브 고정선 ──
+        if self.fixed_calib_line:
+            p1, p2, val, pt = self.fixed_calib_line
+            self._line(img, to_img, p1, p2, calib_clr, unit)
+            self._point_mark(img, to_img, p1, calib_clr, unit)
+            self._point_mark(img, to_img, p2, calib_clr, unit)
+            self._text(img, to_img, pt, f"REF: {val:.3f}mm", calib_clr, unit)
+
+        # ── 측정선 ──
+        for m1, m2, val_text, m_type, pt in self.measurements:
+            p2 = m2
+            if m_type == 'MEAS_HV':
+                p2 = (m2[0], m1[1]) if abs(m1[0] - m2[0]) > abs(m1[1] - m2[1]) else (m1[0], m2[1])
+            self._line(img, to_img, m1, p2, meas_clr, unit)
+            self._point_mark(img, to_img, m1, meas_clr, unit)
+            self._point_mark(img, to_img, m2, meas_clr, unit)
+            self._text(img, to_img, pt, val_text, meas_clr, unit)
+
+        # ── 십자선 ──
+        self.draw_crosshair(img, to_img, unit, live)
+
+        if not live:
+            return
+
+        mouse_f = self._s2f(self.curr_mx, self.curr_my)
+        mouse_in_view = (self.curr_mx <= self.view_w and
+                         self.cam_y_offset <= self.curr_my < self.cam_y_offset + self.cam_display_h)
+
+        # ── 드래그 마커 ──
+        if self.is_dragging and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
+            q = to_img([mouse_f])[0]
+            cv2.drawMarker(img, (int(q[0]), int(q[1])), (0, 255, 255),
+                           markerType=cv2.MARKER_CROSS, markerSize=25, thickness=1)
+
+        # ── 측정 임시 표시 ──
+        if self.measure_p1 and not self.measure_p2:
+            p1 = self.measure_p1
+            p2 = mouse_f
+            if self.current_mode == 'MEAS_HV':
+                p2 = (p2[0], p1[1]) if abs(p2[0] - p1[0]) > abs(p2[1] - p1[1]) else (p1[0], p2[1])
+            self._line(img, to_img, p1, p2, meas_clr, unit)
+            self._point_mark(img, to_img, p1, meas_clr, unit)
+            preview_len = np.hypot(p1[0] - p2[0], p1[1] - p2[1])
+            q = to_img([p2])[0]
+            cv2.putText(img, self._measure_text(preview_len), (int(q[0]) + 8, int(q[1]) - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, meas_clr, 1, cv2.LINE_AA)
+        elif self.measure_p2:
+            self._line(img, to_img, self.measure_p1, self.measure_p2, meas_clr, unit)
+            self._point_mark(img, to_img, self.measure_p1, meas_clr, unit)
+            self._point_mark(img, to_img, self.measure_p2, meas_clr, unit)
+            self._text(img, to_img, mouse_f, self._measure_text(self.measure_temp_val), meas_clr, unit)
+
+        # ── 캘리브 임시 표시 ──
+        if self.calib_temp_data:
+            p1, p2, val = self.calib_temp_data
+            self._line(img, to_img, p1, p2, calib_clr, unit)
+            self._text(img, to_img, mouse_f, f"REF: {val:.3f}mm", calib_clr, unit)
+        elif self.calib_p1 and self.calib_p2:
+            self._line(img, to_img, self.calib_p1, self.calib_p2, calib_clr, unit)
+            self._point_mark(img, to_img, self.calib_p1, calib_clr, unit)
+
+        # ── 경계 맞춤 미리보기: 클릭하면 점이 붙을 위치를 미리 보여줌 ──
+        placing_point = (('MEAS' in self.current_mode and self.measure_p2 is None) or
+                         (self.current_mode == 'CALIB' and not self.calib_temp_data))
+        if self.edge_snap and placing_point and mouse_in_view and not self.view_dragging:
+            snapped = self._snap_to_edge(*mouse_f)
+            if snapped is not None:
+                q = to_img([snapped])[0]
+                cv2.drawMarker(img, (int(round(q[0])), int(round(q[1]))), (0, 255, 255),
+                               markerType=cv2.MARKER_DIAMOND, markerSize=10, thickness=1)
+
+    def draw_crosshair(self, img, to_img, unit=1.0, live=True):
         """십자선 오버레이 - 배치된 십자선 + CROSS 모드 미리보기"""
         # 수평 13mm, 수직 5mm (측정 기준 px/mm, 미보정이면 도면 배율 사용)
-        # CROSS 모드에서는 크기 배율을 별도로 두어 휠로 즉시 조절 가능
         px_per_mm = self.calib_px_per_mm or self.scale
-        H_ARM = 6.5 * px_per_mm * self.cross_size   # 수평 반길이 (px)
-        V_ARM = 2.5 * px_per_mm * self.cross_size   # 수직 반길이 (px)
 
-        def _draw_one(img, cx, cy, angle_deg, color, label=None):
+        def _draw_one(cx, cy, angle_deg, size, color, label=None):
+            h_arm = 6.5 * px_per_mm * size   # 수평 반길이 (원본 px)
+            v_arm = 2.5 * px_per_mm * size   # 수직 반길이 (원본 px)
             rad = np.radians(angle_deg)
             hx, hy = np.cos(rad), np.sin(rad)    # 수평축 단위벡터
             vx, vy = -np.sin(rad), np.cos(rad)   # 수직축 단위벡터
-            # 수평선 (13mm)
-            cv2.line(img,
-                     (int(cx - hx * H_ARM), int(cy - hy * H_ARM)),
-                     (int(cx + hx * H_ARM), int(cy + hy * H_ARM)),
-                     color, 1)
-            # 수직선 (5mm)
-            cv2.line(img,
-                     (int(cx - vx * V_ARM), int(cy - vy * V_ARM)),
-                     (int(cx + vx * V_ARM), int(cy + vy * V_ARM)),
-                     color, 1)
-            # 중심점
-            cv2.circle(img, (int(cx), int(cy)), 2, color, -1)
+            self._line(img, to_img, (cx - hx * h_arm, cy - hy * h_arm),
+                       (cx + hx * h_arm, cy + hy * h_arm), color, unit)
+            self._line(img, to_img, (cx - vx * v_arm, cy - vy * v_arm),
+                       (cx + vx * v_arm, cy + vy * v_arm), color, unit)
+            q = self._fix(to_img([(cx, cy)]))[0]
+            cv2.circle(img, tuple(q), int(2 * unit) << self.SHIFT, color, -1, cv2.LINE_AA, self.SHIFT)
             if label is not None:
-                cv2.putText(img, label,
-                            (int(cx + hx * H_ARM) + 4, int(cy + hy * H_ARM) - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                self._text(img, to_img, (cx + hx * h_arm, cy + hy * h_arm), label, color, unit, 0.4)
 
         cross_clr = self.color_palette[self.idx_cross_color]
-        # 미리보기용 어두운 색
-        preview_clr = tuple(int(c * 0.6) for c in cross_clr)
+        preview_clr = tuple(int(c * 0.6) for c in cross_clr)   # 미리보기용 어두운 색
 
-        # ── 배치된 십자선들 ──
         for i, (px, py, pangle, psize) in enumerate(self.crosshairs):
-            # 저장된 각도와 크기 비율로 다시 그림
-            prev_size = self.cross_size
-            self.cross_size = psize
             color = cross_clr
-            if self.cross_selected_idx == i:
+            if live and self.cross_selected_idx == i:
                 color = (255, 255, 255)
-                cv2.circle(canvas, (int(px), int(py)), 8, (255, 255, 255), 1)
-            _draw_one(canvas, px, py, pangle, color, label=f"#{i+1}")
-            self.cross_size = prev_size
+                q = to_img([(px, py)])[0]
+                cv2.circle(img, (int(q[0]), int(q[1])), 8, (255, 255, 255), 1)
+            _draw_one(px, py, pangle, psize, color, label=f"#{i+1}")
 
-        # ── 미리보기 (CROSS 모드일 때만) ──
-        if self.current_mode == 'CROSS' and self.cross_preview_pos is not None:
+        if live and self.current_mode == 'CROSS' and self.cross_preview_pos is not None:
             px, py = self.cross_preview_pos
-            _draw_one(canvas, px, py, self.cross_angle, preview_clr,
-                      label=f"{self.cross_angle:.1f}°")
+            _draw_one(px, py, self.cross_angle, self.cross_size, preview_clr,
+                      label=f"{self.cross_angle:.1f}deg")
 
-        return canvas
-
-    def draw_weight_overlay(self, canvas):
-        """카메라 영상 우하단에 무게값 오버레이 (저장 이미지에도 포함됨)"""
+    def draw_weight_overlay(self, img, unit=1.0):
+        """영상 우하단에 무게값 표시 (저장 이미지에도 포함됨)"""
         with self.scale_lock:
             w_val = self.scale_weight
 
@@ -987,40 +1262,34 @@ class VisionInspector:
             border_rgb = (120, 120, 120)
             tag = "미연결"
 
-        # 박스 크기·위치 (카메라 원본 해상도 기준)
-        box_w, box_h = 220, 70
-        margin = 20
-        bx1 = canvas.shape[1] - box_w - margin
-        by1 = canvas.shape[0] - box_h - margin
-        bx2 = bx1 + box_w
-        by2 = by1 + box_h
+        # 박스 크기·위치 (unit 배율 적용)
+        box_w, box_h = int(220 * unit), int(70 * unit)
+        margin = int(20 * unit)
+        bx1 = max(0, img.shape[1] - box_w - margin)
+        by1 = max(0, img.shape[0] - box_h - margin)
+        bx2 = min(img.shape[1], bx1 + box_w)
+        by2 = min(img.shape[0], by1 + box_h)
 
-        # 반투명 배경 (알파 블렌딩)
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (20, 20, 20), -1)
-        cv2.addWeighted(overlay, 0.65, canvas, 0.35, 0, canvas)
+        # 반투명 배경 (박스 부분만 계산)
+        roi = img[by1:by2, bx1:bx2]
+        roi[:] = cv2.addWeighted(roi, 0.35, np.full_like(roi, 20), 0.65, 0)
+
+        # PIL로 한글 텍스트 (박스 부분만 변환해서 빠르게)
+        img_pil = Image.fromarray(roi)
+        draw = ImageDraw.Draw(img_pil)
+        font_large = self._font("malgunbd.ttf", max(8, int(26 * unit)))
+        font_small = self._font("malgun.ttf", max(8, int(11 * unit)))
+        u = lambda v: int(v * unit)
+        draw.text((u(10), u(6)), "정밀저울", font=font_small, fill=(180, 180, 180))
+        draw.text((box_w - u(48), u(6)), tag, font=font_small, fill=border_rgb)
+        draw.text((u(10), u(24)), weight_str, font=font_large, fill=(255, 220, 60))
+        draw.text((u(10), u(54)), f"저장 {len(self.weight_log)}건", font=font_small, fill=(140, 140, 140))
+        roi[:] = np.array(img_pil)
 
         # 테두리
         b = border_rgb
-        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), (b[2], b[1], b[0]), 2)
-
-        # PIL로 한글 텍스트
-        img_pil = Image.fromarray(canvas)
-        draw = ImageDraw.Draw(img_pil)
-        try:
-            font_large = ImageFont.truetype("malgunbd.ttf", 26)
-            font_small = ImageFont.truetype("malgun.ttf",   11)
-        except Exception:
-            font_large = font_small = ImageFont.load_default()
-
-        draw.text((bx1 + 10, by1 + 6),  "정밀저울",  font=font_small, fill=(180, 180, 180))
-        draw.text((bx2 - 40, by1 + 6),  tag,         font=font_small, fill=border_rgb)
-        draw.text((bx1 + 10, by1 + 24), weight_str,  font=font_large, fill=(255, 220, 60))
-        draw.text((bx1 + 10, by1 + 54), f"저장 {len(self.weight_log)}건",
-                  font=font_small, fill=(140, 140, 140))
-
-        canvas[:] = np.array(img_pil)
-        return canvas
+        cv2.rectangle(img, (bx1, by1), (bx2 - 1, by2 - 1), (b[2], b[1], b[0]), max(2, int(2 * unit)))
+        return img
 
     # ──────────────────────────────────────────────
     # 마우스
@@ -1052,13 +1321,40 @@ class VisionInspector:
         if event == cv2.EVENT_LBUTTONUP:
             self.pressed_button = None
 
-        if self.loaded_frame is not None:
-            x_ratio, y_ratio = self._get_frame_ratios(self.loaded_frame)
-        else:
-            x_ratio = self.cam_w / self.view_w
-            y_ratio = self.cam_h / max(1, self.cam_display_h)
-        rx = x * x_ratio
-        ry = (y - self.cam_y_offset) * y_ratio
+        # ── 영상 확대/이동 (모든 모드 공통) ──
+        in_view = x <= self.view_w
+        if event == cv2.EVENT_RBUTTONDBLCLK and in_view:
+            self._reset_view()
+            return
+        if event == cv2.EVENT_RBUTTONDOWN and in_view:
+            self.view_dragging = True
+            self.view_lmx, self.view_lmy = x, y
+            return
+        if event == cv2.EVENT_RBUTTONUP:
+            self.view_dragging = False
+            return
+        if event == cv2.EVENT_MOUSEMOVE and self.view_dragging:
+            s = self._view_scale()
+            self.view_cx -= (x - self.view_lmx) / s
+            self.view_cy -= (y - self.view_lmy) / s
+            self.view_lmx, self.view_lmy = x, y
+            self._clamp_view()
+            return
+        if event == cv2.EVENT_MOUSEWHEEL and in_view:
+            # 도면/십자선 조절 모드가 아니거나 Ctrl을 누르고 있으면 휠 = 영상 확대
+            if (self.current_mode not in ('ZOOM', 'ROTATE', 'CROSS')
+                    or flags & cv2.EVENT_FLAG_CTRLKEY):
+                self._zoom_view_at(x, y, 1.25 if flags > 0 else 1 / 1.25)
+                return
+
+        # 마우스 위치를 원본 프레임 좌표로 변환 (측정은 모두 이 좌표로 계산)
+        rx, ry = self._s2f(x, y)
+
+        # 측정점/캘리브레이션 점을 찍는 순간에는 가까운 경계로 맞춤
+        placing_point = (('MEAS' in self.current_mode and self.measure_p2 is None) or
+                         (self.current_mode == 'CALIB' and not self.calib_temp_data))
+        if event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_LBUTTONUP) and in_view and placing_point:
+            rx, ry = self._maybe_snap(rx, ry)
 
         if flags & cv2.EVENT_FLAG_SHIFTKEY:
             if self.measure_p1:
@@ -1097,7 +1393,7 @@ class VisionInspector:
                 self.lmx, self.lmy = x, y
                 if self.crosshairs:
                     best_idx = None
-                    best_dist = 20
+                    best_dist = 12 / self._view_scale()   # 화면 기준 12픽셀 이내
                     for idx, (cx, cy, _, _) in enumerate(self.crosshairs):
                         dist = np.hypot(rx - cx, ry - cy)
                         if dist < best_dist:
@@ -1151,8 +1447,8 @@ class VisionInspector:
             if self.current_mode == 'CALIB':
                 self.calib_p2 = (rx, ry)
             else:
-                dx = (x - self.lmx) * x_ratio
-                dy = (y - self.lmy) * y_ratio
+                dx = (x - self.lmx) / self._view_scale()   # 화면 이동량 → 원본 픽셀 이동량
+                dy = (y - self.lmy) / self._view_scale()
                 if self.current_mode == 'PAN':
                     if self.crosshairs and self.cross_selected_idx is not None:
                         idx = self.cross_selected_idx
@@ -1264,8 +1560,25 @@ class VisionInspector:
             elif self.measurements:
                 self.measurements.pop()
 
+        elif m == 'CAM_SETTINGS':
+            # 카메라 드라이버의 설정 창 (초점, 노출, 선명도 등) - 지원하는 카메라만 열림
+            if self.cap is not None and self.loaded_frame is None:
+                if not self.cap.set(cv2.CAP_PROP_SETTINGS, 1):
+                    messagebox.showinfo("카메라 설정", "이 카메라는 설정 창을 지원하지 않습니다.")
+
+        elif m == 'VIEW_FIT':
+            self._reset_view()
+
+        elif m == 'EDGE_SNAP':
+            self.edge_snap = not self.edge_snap
+
         elif m == 'SAVE_IMG':
-            if self.last_full_canvas is not None:
+            if self.last_frame is not None:
+                # 화면 캡처가 아니라 원본 해상도 영상 위에 측정선·도면을 다시 그려서 저장
+                full = self.last_frame.copy()
+                unit = max(1.0, self.frame_w / self.view_w)
+                self._draw_overlays(full, lambda p: np.asarray(p, dtype=np.float64), unit, live=False)
+                self.draw_weight_overlay(full, unit)
                 root = tk.Tk()
                 root.withdraw()
                 root.attributes("-topmost", True)
@@ -1276,7 +1589,7 @@ class VisionInspector:
                 )
                 if path:
                     try:
-                        res, buffer = cv2.imencode('.jpg', self.last_full_canvas,
+                        res, buffer = cv2.imencode('.jpg', full,
                                                    [int(cv2.IMWRITE_JPEG_QUALITY), 95])
                         if res:
                             with open(path, "wb") as f:
@@ -1393,114 +1706,33 @@ class VisionInspector:
                     cv2.waitKey(1)   # 카메라가 끊겨도 창이 '응답 없음'으로 굳지 않게 이벤트 처리
                     continue
 
-            canvas = frame.copy()
+            self.last_frame = frame
+            fh, fw = frame.shape[:2]
+            if (fw, fh) != (self.frame_w, self.frame_h):
+                # 사진 불러오기·라이브 복귀 등으로 영상 크기가 바뀌면 확대 상태를 처음으로
+                self.frame_w, self.frame_h = fw, fh
+                self._reset_view()
+            self._clamp_view()
 
-            rad = np.radians(self.angle)
-            rot_m = np.array([
-                [ np.cos(rad), -np.sin(rad)],
-                [ np.sin(rad),  np.cos(rad)]
-            ])
-
-            dxf_clr   = self.color_palette[self.idx_dxf_color]
-            meas_clr  = self.color_palette[self.idx_meas_color]
-            calib_clr = self.color_palette[self.idx_calib_color]
-
-            # ── DXF 렌더링 ──────────────────────
-            cx = canvas.shape[1] // 2 + self.offset_x
-            cy = canvas.shape[0] // 2 + self.offset_y
-
-            for ctype, pts in self.dxf_contours:
-                pts_draw = (
-                    (pts @ rot_m.T) * self.scale + [cx, cy]
-                ).astype(np.int32).reshape(-1, 1, 2)
-                closed = (ctype == 'poly')
-                cv2.polylines(canvas, [pts_draw], closed, dxf_clr, 1)
-
-            # ── 캘리브 고정선 ─────────────────────
-            if self.fixed_calib_line:
-                p1, p2, val, pt = self.fixed_calib_line
-                cv2.line(canvas, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), calib_clr, 1)
-                cv2.putText(canvas, f"REF: {val:.1f}mm", (int(pt[0]), int(pt[1])),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
-
-            # ── 측정선 ────────────────────────────
-            for m1, m2, val_text, m_type, pt in self.measurements:
-                p1 = (int(m1[0]), int(m1[1]))
-                p2 = (int(m2[0]), int(m2[1]))
-                if m_type == 'MEAS_HV':
-                    if abs(p1[0] - p2[0]) > abs(p1[1] - p2[1]):
-                        cv2.line(canvas, p1, (p2[0], p1[1]), meas_clr, 1)
-                        p2 = (p2[0], p1[1])
-                    else:
-                        cv2.line(canvas, p1, (p1[0], p2[1]), meas_clr, 1)
-                        p2 = (p1[0], p2[1])
-                else:
-                    cv2.line(canvas, p1, p2, meas_clr, 1)
-                cv2.putText(canvas, val_text, (int(pt[0]), int(pt[1])),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
-
-            x_ratio, y_ratio = self._get_frame_ratios(frame)
-
-            # ── 드래그 마커 ───────────────────────
-            if self.is_dragging and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
-                mx = int(self.curr_mx * x_ratio)
-                my = int((self.curr_my - self.cam_y_offset) * y_ratio)
-                cv2.drawMarker(canvas, (mx, my), (0, 255, 255),
-                               markerType=cv2.MARKER_CROSS, markerSize=25, thickness=1)
-
-            # ── 측정 임시 표시 ────────────────────
-            if self.measure_p1 and not self.measure_p2:
-                p1 = (int(self.measure_p1[0]), int(self.measure_p1[1]))
-                p2 = (int(self.curr_mx * x_ratio), int((self.curr_my - self.cam_y_offset) * y_ratio))
-                if self.current_mode == 'MEAS_HV':
-                    if abs(p2[0] - p1[0]) > abs(p2[1] - p1[1]):
-                        p2 = (p2[0], p1[1])
-                    else:
-                        p2 = (p1[0], p2[1])
-                cv2.line(canvas, p1, p2, meas_clr, 1)
-                cv2.circle(canvas, p1, 5, meas_clr, 1)
-                cv2.circle(canvas, p2, 3, meas_clr, 1)
-                preview_len = np.linalg.norm(np.array(p1) - np.array(p2))
-                cv2.putText(canvas, self._measure_text(preview_len),
-                            (max(10, p2[0]), max(10, p2[1])),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, meas_clr, 1)
-            elif self.measure_p2:
-                cx = int(self.curr_mx * x_ratio)
-                cy = int((self.curr_my - self.cam_y_offset) * y_ratio)
-                cv2.putText(canvas, self._measure_text(self.measure_temp_val),
-                            (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, meas_clr, 1)
-            elif self.measure_p1:
-                cv2.circle(canvas, (int(self.measure_p1[0]), int(self.measure_p1[1])), 5, meas_clr, 1)
-
-            # ── 캘리브 임시 표시 ──────────────────
-            if self.calib_temp_data:
-                cx = int(self.curr_mx * x_ratio)
-                cy = int((self.curr_my - self.cam_y_offset) * y_ratio)
-                cv2.putText(canvas, f"REF: {self.calib_temp_data[2]:.1f}mm",
-                            (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, calib_clr, 1)
-            elif self.calib_p1 and self.calib_p2:
-                cv2.line(canvas,
-                         (int(self.calib_p1[0]), int(self.calib_p1[1])),
-                         (int(self.calib_p2[0]), int(self.calib_p2[1])),
-                         calib_clr, 1)
-
-            # ── 십자선 오버레이 ────────────────────
-            canvas = self.draw_crosshair(canvas)
-
-            # ── 무게 오버레이 (저장 이미지에도 포함) ──
-            canvas = self.draw_weight_overlay(canvas)
+            # ── 확대된 영상 + 오버레이 (선은 화면 기준 1픽셀로 그림) ──
+            view = self._render_view(frame)
+            self._draw_overlays(view, self._f2s_arr, unit=1.0, live=True)
+            self.draw_weight_overlay(view, unit=1.0)
 
             # ── 화면 출력 ─────────────────────────
-            self.last_full_canvas = canvas.copy()
-            res_view = cv2.resize(canvas, (self.view_w, self.cam_display_h))
             display_img = np.zeros((self.view_h, self.total_w, 3), dtype=np.uint8)
-            display_img[self.cam_y_offset:self.cam_y_offset + self.cam_display_h, :self.view_w] = res_view
+            display_img[self.cam_y_offset:self.cam_y_offset + self.cam_display_h, :self.view_w] = view
             display_img = self.draw_ui(display_img)
 
             cv2.imshow('Vision Inspector', display_img)
             window_shown = True
-            if cv2.waitKey(1) == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key in (ord('f'), ord('F')):
+                self._reset_view()
+            elif key in (ord('e'), ord('E')):
+                self.edge_snap = not self.edge_snap
 
         self.cap.release()
         cv2.destroyAllWindows()
