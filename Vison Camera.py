@@ -7,7 +7,7 @@ import threading
 import subprocess
 from datetime import datetime
 import tkinter as tk
-from tkinter import filedialog, simpledialog, messagebox
+from tkinter import filedialog, messagebox
 from PIL import ImageFont, ImageDraw, Image
 
 try:
@@ -86,6 +86,8 @@ class VisionInspector:
         self.edge_snap = True             # 측정/캘리브 점을 가까운 경계에 자동으로 맞춤
         self.view_dragging = False        # 오른쪽 버튼으로 영상 이동 중
         self._font_cache = {}
+        self._modal = None                # 화면 안 입력판 (열려 있으면 다른 조작은 막음)
+        self._modal_hits = []
         self.view_w, self.ui_w = 1200, 340
         self.total_w = self.view_w + self.ui_w
 
@@ -233,7 +235,6 @@ class VisionInspector:
         self.templates = []
         self.tpl_selected = None
         self.tpl_color = (255, 0, 255)  # 자홍색 (BGR)
-        self._dialog_open = False       # 입력창이 떠 있는 동안 마우스 이벤트 무시
 
         # 저울 관련 초기화
         self.scale_weight = None          # 현재 무게값 (g)
@@ -254,7 +255,7 @@ class VisionInspector:
     def connect_scale(self, port, baud=9600):
         """실제 RS-232 저울 연결 (pyserial 필요)"""
         if not SERIAL_AVAILABLE:
-            messagebox.showerror("오류", "pyserial이 설치되지 않았습니다.\n\npip install pyserial")
+            self._message("오류", "pyserial이 설치되지 않았습니다.\n\npip install pyserial")
             return False
         try:
             ser = serial.Serial(port, baudrate=baud, bytesize=8,
@@ -304,7 +305,7 @@ class VisionInspector:
             return True
         except Exception as ex:
             self.scale_error = str(ex)
-            messagebox.showerror("저울 연결 실패", str(ex))
+            self._message("저울 연결 실패", str(ex))
             return False
 
     def disconnect_scale(self):
@@ -330,12 +331,12 @@ class VisionInspector:
     def save_weight(self):
         """현재 무게를 로그에 저장하고 CSV 파일에 기록"""
         if not self.scale_connected:
-            messagebox.showwarning("저울", "저울이 연결되어 있지 않습니다.\n'저울 연결'을 먼저 하세요.")
+            self._message("저울", "저울이 연결되어 있지 않습니다.\n'저울 연결'을 먼저 하세요.")
             return
         with self.scale_lock:
             w = self.scale_weight
         if w is None:
-            messagebox.showwarning("저울", "수신된 무게값이 없습니다.")
+            self._message("저울", "수신된 무게값이 없습니다.")
             return
 
         meas_count = len(self.measurements)
@@ -356,9 +357,9 @@ class VisionInspector:
                 if write_header:
                     f.write("시간,무게(g),측정개수,출처\n")
                 f.write(f"{entry['time']},{entry['weight_g']},{entry['measurements']},{entry['source']}\n")
-            messagebox.showinfo("무게 저장", f"저장 완료\n무게: {w:.2f} g\n파일: weight_log.csv")
+            self._message("무게 저장", f"저장 완료\n무게: {w:.2f} g\n파일: weight_log.csv")
         except Exception as ex:
-            messagebox.showerror("저장 실패", str(ex))
+            self._message("저장 실패", str(ex))
 
     # ──────────────────────────────────────────────
     # 카메라
@@ -525,9 +526,7 @@ class VisionInspector:
         self._reset_calibration("카메라가 바뀌어")
 
     def load_image_action(self):
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
+        root = self._dialog_root()
         path = filedialog.askopenfilename(
             filetypes=[("이미지 파일", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
                        ("모든 파일", "*.*")],
@@ -543,7 +542,7 @@ class VisionInspector:
         except (OSError, ValueError, cv2.error):
             image = None
         if image is None:
-            messagebox.showerror("사진 불러오기 실패", "이미지 파일을 읽을 수 없습니다.")
+            self._message("사진 불러오기 실패", "이미지 파일을 읽을 수 없습니다.")
             return
 
         # 화면(카메라) 비율과 다른 사진은 가로·세로가 다르게 늘어나 보이므로 검은 여백을 붙여 비율을 맞춤
@@ -568,7 +567,7 @@ class VisionInspector:
     # ──────────────────────────────────────────────
     def load_dxf_action(self, path):
         if not path or not os.path.exists(path):
-            messagebox.showerror("오류", f"파일을 찾을 수 없습니다:\n{path}")
+            self._message("오류", f"파일을 찾을 수 없습니다:\n{path}")
             return
         try:
             doc = ezdxf.readfile(path)
@@ -686,7 +685,7 @@ class VisionInspector:
             # ── 결과 확인 ─────────────────────────
             if not all_pts:
                 entity_types = set(e.dxftype() for e in msp)
-                messagebox.showwarning(
+                self._message(
                     "DXF 경고",
                     f"읽을 수 있는 도형이 없습니다.\n\n"
                     f"파일에 포함된 엔티티 타입:\n{', '.join(sorted(entity_types))}\n\n"
@@ -728,16 +727,16 @@ class VisionInspector:
                 t = e.dxftype()
                 counts[t] = counts.get(t, 0) + 1
             summary = '\n'.join(f"  {k}: {v}개" for k, v in sorted(counts.items()))
-            messagebox.showinfo(
+            self._message(
                 "DXF 로드 완료",
                 f"도면 {len(self.drawings)}: {os.path.basename(path)}\n"
                 f"도형 {len(contours)}개 로드됨\n\n엔티티 구성:\n{summary}"
             )
 
         except ezdxf.DXFStructureError as ex:
-            messagebox.showerror("DXF 오류", f"DXF 파일 구조 오류:\n{ex}")
+            self._message("DXF 오류", f"DXF 파일 구조 오류:\n{ex}")
         except Exception as ex:
-            messagebox.showerror("DXF 오류", f"도면 로드 실패:\n{ex}")
+            self._message("DXF 오류", f"도면 로드 실패:\n{ex}")
 
     # ──────────────────────────────────────────────
     # UI
@@ -949,7 +948,12 @@ class VisionInspector:
         if self.camera_list_visible:
             self._draw_camera_list(display_img, draw, font_section, font_status)
 
-        return np.array(img_pil)
+        if self._modal is None:
+            return np.array(img_pil)
+        # 입력판이 열려 있으면 뒤 화면을 어둡게 하고 그 위에 입력판을 그림
+        dimmed = Image.fromarray((np.asarray(img_pil) * 0.45).astype(np.uint8))
+        self._draw_modal(ImageDraw.Draw(dimmed))
+        return np.array(dimmed)
 
     # ──────────────────────────────────────────────
     # 측정 기준 (캘리브레이션)
@@ -1237,152 +1241,62 @@ class VisionInspector:
                 best, best_d = i, d
         return best
 
-    def _template_dialog(self, initial=None):
-        """도형 종류·치수(mm)·각도 입력창. 결과 dict, 삭제면 'delete', 취소면 None"""
-        root = tk.Tk()
-        root.withdraw()
-        dlg = tk.Toplevel(root)
-        dlg.title("기준 도형 수정" if initial else "기준 도형 추가")
-        dlg.attributes("-topmost", True)
-        dlg.resizable(False, False)
+    def _template_form(self, initial, on_done, on_delete=None):
+        """도형 종류·치수(mm)·각도 입력판 (화면 안). 확인하면 on_done(dict)"""
+        kind = initial['type'] if initial else 'circle'
+        fields = [
+            {'key': 'w', 'label': {'circle': '지름 (mm)', 'rect': '가로 (mm)', 'line': '길이 (mm)'},
+             'value': f"{initial['w']:g}" if initial else ""},
+            {'key': 'h', 'label': '세로 (mm)', 'enabled': {'rect'},
+             'value': f"{initial['h']:g}" if initial and initial['type'] == 'rect' else ""},
+            {'key': 'angle', 'label': '각도 (도)', 'value': f"{initial['angle']:g}" if initial else "0"},
+        ]
 
-        kind = tk.StringVar(value=initial['type'] if initial else 'circle')
-        v_w = tk.StringVar(value=f"{initial['w']:g}" if initial else "")
-        v_h = tk.StringVar(value=f"{initial['h']:g}" if initial and initial['type'] == 'rect' else "")
-        v_a = tk.StringVar(value=f"{initial['angle']:g}" if initial else "0")
-        result = {'value': None}
-
-        box = tk.Frame(dlg, padx=14, pady=10)
-        box.pack()
-        row = tk.Frame(box)
-        row.grid(row=0, column=0, columnspan=2, pady=(0, 8))
-        for key in ('circle', 'rect', 'line'):
-            tk.Radiobutton(row, text=self.TPL_NAMES[key], variable=kind, value=key).pack(side='left', padx=6)
-        lbl_w = tk.Label(box, width=10, anchor='w')
-        lbl_w.grid(row=1, column=0, sticky='w')
-        e_w = tk.Entry(box, textvariable=v_w, width=12)
-        e_w.grid(row=1, column=1, pady=2)
-        tk.Label(box, text="세로 (mm)", width=10, anchor='w').grid(row=2, column=0, sticky='w')
-        e_h = tk.Entry(box, textvariable=v_h, width=12)
-        e_h.grid(row=2, column=1, pady=2)
-        tk.Label(box, text="각도 (°)", width=10, anchor='w').grid(row=3, column=0, sticky='w')
-        tk.Entry(box, textvariable=v_a, width=12).grid(row=3, column=1, pady=2)
-
-        def refresh(*_):
-            lbl_w.config(text={'circle': '지름 (mm)', 'rect': '가로 (mm)', 'line': '길이 (mm)'}[kind.get()])
-            e_h.config(state='normal' if kind.get() == 'rect' else 'disabled')
-        kind.trace_add('write', refresh)
-        refresh()
-
-        def ok(*_):
+        def ok(vals):
             try:
-                w = float(v_w.get())
-                h = float(v_h.get()) if kind.get() == 'rect' else 0.0
-                ang = float(v_a.get() or 0)
-                if w <= 0 or (kind.get() == 'rect' and h <= 0):
-                    raise ValueError
+                w = float(vals['w'])
+                h = float(vals['h']) if vals['_radio'] == 'rect' else 0.0
+                ang = float(vals['angle'] or 0)
             except ValueError:
-                messagebox.showerror("입력 오류", "치수는 0보다 큰 숫자로 입력하세요.", parent=dlg)
-                return
-            result['value'] = {'type': kind.get(), 'w': w, 'h': h, 'angle': ang % 360}
-            dlg.destroy()
+                return "치수는 숫자로 입력하세요."
+            if w <= 0 or (vals['_radio'] == 'rect' and h <= 0):
+                return "치수는 0보다 커야 합니다."
+            on_done({'type': vals['_radio'], 'w': w, 'h': h, 'angle': ang % 360})
 
-        def delete():
-            result['value'] = 'delete'
-            dlg.destroy()
+        self._form("기준 도형 수정" if initial else "기준 도형 추가", fields, ok,
+                   radio=([(k, self.TPL_NAMES[k]) for k in ('circle', 'rect', 'line')], kind),
+                   on_delete=on_delete)
 
-        btns = tk.Frame(box)
-        btns.grid(row=4, column=0, columnspan=2, pady=(10, 0))
-        tk.Button(btns, text="확인", width=8, command=ok).pack(side='left', padx=3)
-        if initial:
-            tk.Button(btns, text="삭제", width=8, command=delete).pack(side='left', padx=3)
-        tk.Button(btns, text="취소", width=8, command=dlg.destroy).pack(side='left', padx=3)
-        dlg.bind('<Return>', ok)
-        dlg.bind('<Escape>', lambda e: dlg.destroy())
-        e_w.focus_set()
-        dlg.grab_set()
-
-        self._dialog_open = True
-        try:
-            root.wait_window(dlg)
-        finally:
-            self._dialog_open = False
-            root.destroy()
-        return result['value']
-
-    def _product_dialog(self, current=None):
-        """제품 목록에서 하나를 고르는 창. (제품명, 높이) / 삭제면 'delete' / 취소면 None"""
-        root = tk.Tk()
-        root.withdraw()
-        dlg = tk.Toplevel(root)
-        dlg.title("제품 게이지 변경" if current else "제품 게이지")
-        dlg.attributes("-topmost", True)
-        dlg.resizable(False, False)
-        result = {'value': None}
-
-        box = tk.Frame(dlg, padx=14, pady=10)
-        box.pack()
-        tk.Label(box, text=f"제품을 더블클릭하세요  (평행선 {GAUGE_BAR_MM:g}mm, 간격 = 제품 높이)").pack(anchor='w')
-        lb = tk.Listbox(box, width=34, height=min(12, max(4, len(PRODUCTS))), font=("맑은 고딕", 11),
-                        activestyle='dotbox', exportselection=False)
-        lb.pack(pady=6)
-        for name, height in PRODUCTS:
-            lb.insert('end', f"{name}   ({height:g} mm)")
+    def _product_pick(self, on_done, current=None, on_delete=None):
+        """제품 목록 입력판 (화면 안). 고르면 on_done(제품명, 높이)"""
+        if not PRODUCTS:
+            self._message("제품 게이지", "제품 목록이 비어 있습니다.")
+            return
         names = [n for n, _ in PRODUCTS]
-        start = names.index(current) if current in names else 0
-        if PRODUCTS:
-            lb.selection_set(start)
-            lb.activate(start)
-            lb.see(start)
-
-        def ok(*_):
-            sel = lb.curselection()
-            if sel:
-                result['value'] = PRODUCTS[sel[0]]
-                dlg.destroy()
-
-        def delete():
-            result['value'] = 'delete'
-            dlg.destroy()
-
-        btns = tk.Frame(box)
-        btns.pack(pady=(4, 0))
-        tk.Button(btns, text="확인", width=8, command=ok).pack(side='left', padx=3)
-        if current:
-            tk.Button(btns, text="삭제", width=8, command=delete).pack(side='left', padx=3)
-        tk.Button(btns, text="취소", width=8, command=dlg.destroy).pack(side='left', padx=3)
-        lb.bind('<Double-Button-1>', ok)
-        dlg.bind('<Return>', ok)
-        dlg.bind('<Escape>', lambda e: dlg.destroy())
-        lb.focus_set()
-        dlg.grab_set()
-
-        self._dialog_open = True
-        try:
-            root.wait_window(dlg)
-        finally:
-            self._dialog_open = False
-            root.destroy()
-        return result['value']
+        self._pick("제품 게이지 변경" if current else "제품 게이지",
+                   [f"{name}   ({height:g} mm)" for name, height in PRODUCTS],
+                   lambda i: on_done(*PRODUCTS[i]),
+                   sel=names.index(current) if current in names else 0,
+                   text=f"제품을 더블클릭하세요  (평행선 {GAUGE_BAR_MM:g}mm, 간격 = 제품 높이)",
+                   on_delete=on_delete)
 
     def _add_template(self, gauge=False):
         if not self.calib_px_per_mm:
-            messagebox.showinfo("기준 도형", "먼저 캘리브레이션을 하세요.\n기준 도형은 실제 치수(mm) 크기로 표시됩니다.")
+            self._message("기준 도형", "먼저 캘리브레이션을 하세요.\n기준 도형은 실제 치수(mm) 크기로 표시됩니다.")
             return
+
+        def place(res):
+            res.update(cx=self.view_cx, cy=self.view_cy)   # 지금 보고 있는 화면 가운데에 배치
+            self.templates.append(res)
+            self.tpl_selected = len(self.templates) - 1
+            self.cross_selected_idx = self.cross_edit_idx = None
+            self.current_mode = 'PAN'                        # 바로 끌어서 옮길 수 있게
+
         if gauge:
-            picked = self._product_dialog()
-            if not picked:
-                return
-            res = {'type': 'gauge', 'name': picked[0], 'w': picked[1], 'h': GAUGE_BAR_MM, 'angle': 0.0}
+            self._product_pick(lambda name, height: place(
+                {'type': 'gauge', 'name': name, 'w': height, 'h': GAUGE_BAR_MM, 'angle': 0.0}))
         else:
-            res = self._template_dialog()
-        if not isinstance(res, dict):
-            return
-        res.update(cx=self.view_cx, cy=self.view_cy)   # 지금 보고 있는 화면 가운데에 배치
-        self.templates.append(res)
-        self.tpl_selected = len(self.templates) - 1
-        self.cross_selected_idx = self.cross_edit_idx = None
-        self.current_mode = 'PAN'                        # 바로 끌어서 옮길 수 있게
+            self._template_form(None, place)
 
     def _edit_template(self, idx=None):
         if idx is None:
@@ -1390,21 +1304,21 @@ class VisionInspector:
             if idx is None or not (0 <= idx < len(self.templates)):
                 idx = len(self.templates) - 1 if self.templates else None
         if idx is None:
-            messagebox.showinfo("기준 도형", "수정할 기준 도형이 없습니다.\n'도형 추가'로 먼저 만드세요.")
+            self._message("기준 도형", "수정할 기준 도형이 없습니다.\n'도형 추가'로 먼저 만드세요.")
             return
         t = self.templates[idx]
-        if t['type'] == 'gauge':
-            res = self._product_dialog(t['name'])   # 제품 게이지는 제품을 다시 골라서 변경
-            if isinstance(res, tuple):
-                res = {'name': res[0], 'w': res[1]}
-        else:
-            res = self._template_dialog(t)
-        if res == 'delete':
-            self.templates.pop(idx)
+        self.tpl_selected = idx
+
+        def delete():
+            if t in self.templates:
+                self.templates.remove(t)
             self.tpl_selected = None
-        elif isinstance(res, dict):
-            t.update(res)
-            self.tpl_selected = idx
+
+        if t['type'] == 'gauge':   # 제품 게이지는 제품을 다시 골라서 변경
+            self._product_pick(lambda name, height: t.update(name=name, w=height),
+                               current=t['name'], on_delete=delete)
+        else:
+            self._template_form(t, t.update, on_delete=delete)
 
     def _draw_templates(self, img, to_img, unit, live):
         for i, t in enumerate(self.templates):
@@ -1431,6 +1345,266 @@ class VisionInspector:
                 self._pil_text(img, (q[0] + 6 * unit, q[1] - 18 * unit), self._tpl_label(t), color, 13 * unit)
             else:
                 self._text(img, to_img, anchor, self._tpl_label(t), color, unit, 0.45)
+
+    # ──────────────────────────────────────────────
+    # 화면 안 입력판 (팝업창 대신 프로그램 화면 가운데에 표시)
+    #   form: 숫자 입력 / list: 목록에서 고르기 / confirm: 예·아니요 / message: 안내
+    #   키보드: 숫자 입력, Tab·↑↓ 칸 이동, Enter 확인, Esc 취소, Backspace 지우기
+    # ──────────────────────────────────────────────
+    KEY_UP, KEY_DOWN = 2490368, 2621440   # cv2.waitKeyEx 화살표 키 (Windows)
+    MODAL_W = 440
+    LIST_VISIBLE = 8
+
+    def _open_modal(self, m):
+        m.setdefault('error', '')
+        m.setdefault('text', '')
+        self._modal = m
+        self._modal_hits = []
+        self.is_dragging = False
+        self.view_dragging = False
+
+    def _message(self, title, text):
+        self._open_modal({'kind': 'message', 'title': title, 'text': text,
+                          'buttons': [('확인', 'cancel', 'primary')]})
+
+    def _confirm(self, title, text, on_yes):
+        self._open_modal({'kind': 'confirm', 'title': title, 'text': text, 'on_ok': lambda _: on_yes(),
+                          'buttons': [('예', 'ok', 'primary'), ('아니요', 'cancel', None)]})
+
+    def _form(self, title, fields, on_ok, radio=None, on_delete=None, text='', on_cancel=None):
+        """fields: [{'key', 'label'(문자열 또는 라디오값별 dict), 'value', 'enabled'(라디오값 집합), 'numeric'}]"""
+        for f in fields:
+            f.setdefault('enabled', None)
+            f.setdefault('numeric', True)
+            f['value'] = str(f.get('value', ''))
+        m = {'kind': 'form', 'title': title, 'text': text, 'fields': fields, 'on_ok': on_ok,
+             'on_delete': on_delete, 'on_cancel': on_cancel, 'radio_opts': radio[0] if radio else None,
+             'radio': radio[1] if radio else None, 'fresh': True,
+             'buttons': [('확인', 'ok', 'primary')] + ([('삭제', 'delete', 'danger')] if on_delete else [])
+                        + [('취소', 'cancel', None)]}
+        m['active'] = next((i for i, f in enumerate(fields) if self._field_enabled(m, f)), None)
+        self._open_modal(m)
+
+    def _pick(self, title, items, on_ok, sel=0, text='', on_delete=None):
+        m = {'kind': 'list', 'title': title, 'text': text, 'items': items, 'sel': sel,
+             'scroll': max(0, sel - self.LIST_VISIBLE + 1), 'on_ok': on_ok, 'on_delete': on_delete,
+             'buttons': [('확인', 'ok', 'primary')] + ([('삭제', 'delete', 'danger')] if on_delete else [])
+                        + [('취소', 'cancel', None)]}
+        self._open_modal(m)
+
+    @staticmethod
+    def _field_enabled(m, f):
+        return f['enabled'] is None or m['radio'] in f['enabled']
+
+    def _modal_action(self, action):
+        m = self._modal
+        if m is None:
+            return
+        if action == 'cancel':
+            self._modal = None
+            if m.get('on_cancel'):
+                m['on_cancel']()
+            return
+        if action == 'delete':
+            self._modal = None
+            m['on_delete']()
+            return
+        if m['kind'] == 'form':
+            arg = {f['key']: f['value'].strip() for f in m['fields']}
+            arg['_radio'] = m['radio']
+        elif m['kind'] == 'list':
+            if not m['items']:
+                return
+            arg = m['sel']
+        else:
+            arg = None
+        self._modal = None   # 먼저 닫음 (확인 동작이 안내판을 새로 띄울 수 있음)
+        err = m['on_ok'](arg) if m.get('on_ok') else None
+        if isinstance(err, str):   # 입력값 오류 → 같은 입력판을 다시 띄우고 오류 표시
+            m['error'] = err
+            self._modal = m
+
+    def _modal_move_field(self, step):
+        m = self._modal
+        enabled = [i for i, f in enumerate(m['fields']) if self._field_enabled(m, f)]
+        if not enabled:
+            return
+        pos = enabled.index(m['active']) if m['active'] in enabled else -1
+        m['active'] = enabled[(pos + step) % len(enabled)]
+        m['fresh'] = True
+
+    def _modal_key(self, key):
+        m = self._modal
+        if key in (13, 10):
+            self._modal_action('ok')
+            return
+        if key == 27:
+            self._modal_action('cancel')
+            return
+        if m['kind'] == 'list':
+            if key in (self.KEY_UP, self.KEY_DOWN) and m['items']:
+                m['sel'] = min(max(m['sel'] + (1 if key == self.KEY_DOWN else -1), 0), len(m['items']) - 1)
+                m['scroll'] = min(max(m['scroll'], m['sel'] - self.LIST_VISIBLE + 1), m['sel'])
+            return
+        if m['kind'] != 'form' or m['active'] is None:
+            return
+        if key == 9 or key == self.KEY_DOWN:
+            self._modal_move_field(1)
+            return
+        if key == self.KEY_UP:
+            self._modal_move_field(-1)
+            return
+        f = m['fields'][m['active']]
+        if key == 8:   # Backspace
+            f['value'] = '' if m['fresh'] else f['value'][:-1]
+            m['fresh'] = False
+            m['error'] = ''
+            return
+        ch = chr(key) if 32 <= key < 127 else ''
+        allowed = '0123456789.-' if f['numeric'] else ''.join(chr(c) for c in range(32, 127))
+        if ch and ch in allowed and len(f['value']) < 20:
+            # 칸을 처음 고른 뒤 입력하면 기존 값을 새로 씀 (수정할 때 지우는 수고를 덜기 위함)
+            f['value'] = ch if m['fresh'] else f['value'] + ch
+            m['fresh'] = False
+            m['error'] = ''
+
+    def _modal_mouse(self, event, x, y, flags):
+        m = self._modal
+        if event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_LBUTTONDBLCLK):
+            for x1, y1, x2, y2, (what, val) in self._modal_hits:
+                if not (x1 <= x <= x2 and y1 <= y <= y2):
+                    continue
+                if what == 'radio':
+                    m['radio'] = val
+                    if m['active'] is None or not self._field_enabled(m, m['fields'][m['active']]):
+                        m['active'] = next((i for i, f in enumerate(m['fields'])
+                                            if self._field_enabled(m, f)), None)
+                    m['fresh'] = True
+                elif what == 'field':
+                    m['active'] = val
+                    m['fresh'] = True
+                elif what == 'item':
+                    m['sel'] = val
+                    if event == cv2.EVENT_LBUTTONDBLCLK:
+                        self._modal_action('ok')
+                elif what == 'button' and event == cv2.EVENT_LBUTTONDOWN:
+                    self._modal_action(val)
+                return
+        elif event == cv2.EVENT_MOUSEWHEEL and m['kind'] == 'list':
+            m['scroll'] = min(max(m['scroll'] + (-1 if flags > 0 else 1), 0),
+                              max(0, len(m['items']) - self.LIST_VISIBLE))
+
+    def _draw_modal(self, draw):
+        """입력판을 그리고 클릭 영역을 기록"""
+        m = self._modal
+        f_title = self._font("malgunbd.ttf", 15)
+        f_body = self._font("malgun.ttf", 13)
+        f_small = self._font("malgun.ttf", 10)
+        accent, panel, txt = (204, 122, 0), (48, 45, 45), (241, 241, 241)   # BGR 순서
+        W, pad = self.MODAL_W, 18
+        text_lines = m['text'].split('\n') if m['text'] else []
+        h = pad + 28 + len(text_lines) * 21 + (8 if text_lines else 0)
+        if m['kind'] == 'form':
+            h += (40 if m['radio_opts'] else 0) + len(m['fields']) * 38
+        elif m['kind'] == 'list':
+            h += min(self.LIST_VISIBLE, max(1, len(m['items']))) * 28 + 6
+        h += (24 if m['error'] else 0) + 46 + (18 if m['kind'] in ('form', 'list') else 0) + pad
+        x0 = (self.view_w - W) // 2
+        y0 = self.cam_y_offset + max(10, (self.cam_display_h - h) // 2)
+        hits = []
+
+        def center_text(box, text, font, fill):
+            bx1, by1, bx2, by2 = draw.textbbox((0, 0), text, font=font)
+            draw.text(((box[0] + box[2] - (bx2 - bx1)) / 2 - bx1, (box[1] + box[3] - (by2 - by1)) / 2 - by1),
+                      text, font=font, fill=fill)
+
+        draw.rectangle((x0, y0, x0 + W, y0 + h), fill=panel, outline=accent, width=2)
+        y = y0 + pad
+        draw.text((x0 + pad, y), m['title'], font=f_title, fill=txt)
+        y += 28
+        for line in text_lines:
+            draw.text((x0 + pad, y), line, font=f_body, fill=(205, 205, 205))
+            y += 21
+        if text_lines:
+            y += 8
+
+        if m['kind'] == 'form':
+            if m['radio_opts']:
+                n = len(m['radio_opts'])
+                bw = (W - 2 * pad - (n - 1) * 6) / n
+                for i, (val, label) in enumerate(m['radio_opts']):
+                    box = (x0 + pad + i * (bw + 6), y, x0 + pad + i * (bw + 6) + bw, y + 30)
+                    draw.rectangle(box, fill=accent if m['radio'] == val else (75, 75, 75))
+                    center_text(box, label, f_body, txt)
+                    hits.append((*box, ('radio', val)))
+                y += 40
+            for i, f in enumerate(m['fields']):
+                enabled = self._field_enabled(m, f)
+                label = f['label'][m['radio']] if isinstance(f['label'], dict) else f['label']
+                draw.text((x0 + pad, y + 6), label, font=f_body, fill=txt if enabled else (110, 110, 110))
+                box = (x0 + pad + 130, y, x0 + W - pad, y + 30)
+                active = enabled and i == m['active']
+                draw.rectangle(box, fill=(28, 28, 28) if enabled else (58, 58, 58),
+                               outline=accent if active else (95, 95, 95), width=2 if active else 1)
+                if enabled:
+                    value = f['value']
+                    if active and m['fresh'] and value:
+                        # 새로 입력하면 바뀔 값임을 표시 (선택된 것처럼)
+                        bx1, by1, bx2, by2 = draw.textbbox((box[0] + 8, y + 5), value, font=f_body)
+                        draw.rectangle((bx1 - 2, by1 - 2, bx2 + 2, by2 + 2), fill=(140, 90, 30))
+                    draw.text((box[0] + 8, y + 5), value + ('|' if active and not m['fresh'] else ''),
+                              font=f_body, fill=txt)
+                    hits.append((*box, ('field', i)))
+                y += 38
+        elif m['kind'] == 'list':
+            vis = m['items'][m['scroll']:m['scroll'] + self.LIST_VISIBLE]
+            for j, item in enumerate(vis):
+                i = m['scroll'] + j
+                box = (x0 + pad, y, x0 + W - pad, y + 26)
+                draw.rectangle(box, fill=accent if i == m['sel'] else (62, 62, 62))
+                draw.text((box[0] + 10, y + 4), item, font=f_body, fill=txt)
+                hits.append((*box, ('item', i)))
+                y += 28
+            if not m['items']:
+                draw.text((x0 + pad, y + 4), "(목록이 비어 있음)", font=f_body, fill=(150, 150, 150))
+                y += 28
+            if len(m['items']) > self.LIST_VISIBLE:
+                draw.text((x0 + W - pad - 120, y), f"휠로 더 보기 ({len(m['items'])}개)", font=f_small,
+                          fill=(160, 160, 160))
+            y += 6
+
+        if m['error']:
+            draw.text((x0 + pad, y + 2), m['error'], font=f_body, fill=(80, 80, 255))
+            y += 24
+        y += 8
+        bx = x0 + W - pad
+        for label, action, style in reversed(m['buttons']):
+            box = (bx - 90, y, bx, y + 32)
+            fill = accent if style == 'primary' else (60, 60, 185) if style == 'danger' else (85, 85, 85)
+            draw.rectangle(box, fill=fill)
+            center_text(box, label, f_body, txt)
+            hits.append((*box, ('button', action)))
+            bx -= 98
+        if m['kind'] in ('form', 'list'):
+            hint = "Enter: 확인   Esc: 취소   Tab/↑↓: 칸 이동" if m['kind'] == 'form' \
+                else "더블클릭 또는 Enter: 선택   Esc: 취소   ↑↓: 이동"
+            draw.text((x0 + pad, y + 40), hint, font=f_small, fill=(150, 150, 150))
+        self._modal_hits = hits
+
+    def _dialog_root(self):
+        """파일 선택 창용 Tk 창: 프로그램 창 가운데·맨 앞에 두어 파일 창이 같은 모니터, 맨 앞에 뜨게 함"""
+        root = tk.Tk()
+        root.overrideredirect(True)
+        root.attributes("-alpha", 0.0)
+        root.attributes("-topmost", True)
+        try:
+            wx, wy, ww, wh = cv2.getWindowImageRect('Vision Inspector')
+            root.geometry(f"1x1+{wx + ww // 2 - 300}+{wy + wh // 2 - 200}")
+        except cv2.error:
+            pass
+        root.update()
+        root.focus_force()
+        return root
 
     def _font(self, name, size):
         """폰트를 매 프레임 다시 읽지 않도록 캐시"""
@@ -1691,7 +1865,8 @@ class VisionInspector:
     # 마우스
     # ──────────────────────────────────────────────
     def mouse_callback(self, event, x, y, flags, param):
-        if self._dialog_open:   # 입력창이 떠 있는 동안 들어오는 마우스 이벤트는 무시
+        if self._modal is not None:   # 입력판이 열려 있으면 입력판만 조작
+            self._modal_mouse(event, x, y, flags)
             return
         self.curr_mx, self.curr_my = x, y
 
@@ -1916,25 +2091,39 @@ class VisionInspector:
                 # 시작/끝점을 먼저 따로 저장하고 드래그 상태를 정리한 뒤 입력창을 띄움
                 calib_start, calib_end = self.calib_p1, (rx, ry)
                 self.is_dragging = False
-                self.calib_p1 = self.calib_p2 = None
                 dist_px = np.linalg.norm(np.array(calib_start) - np.array(calib_end))
                 if dist_px > 10:
-                    root = tk.Tk()
-                    root.withdraw()
-                    root.attributes("-topmost", True)
-                    val = simpledialog.askfloat("캘리브레이션", "실제 길이(mm)를 입력하세요:", parent=root)
-                    root.destroy()
-                    if val and val > 0:
-                        # 측정 기준을 정하고, 도면도 실제 치수 크기로 맞춤
-                        self.calib_px_per_mm = dist_px / val
-                        self._set_all_drawings_real_size()
-                        self.calib_notice = ""
-                        self.calib_temp_data = (calib_start, calib_end, val)
+                    self._ask_calibration_length(calib_start, calib_end, dist_px)
+                    return   # 입력하는 동안 기준선이 보이도록 calib_p1/p2를 남겨 둠
             self.is_dragging = False
             if self.current_mode not in ['PAN', 'ZOOM', 'ROTATE']:
                 self.cross_edit_idx = None
                 self.cross_selected_idx = None
             self.calib_p1 = self.calib_p2 = None
+
+    def _ask_calibration_length(self, start, end, dist_px):
+        """그린 기준선의 실제 길이(mm)를 화면 안 입력판으로 받음"""
+        self.calib_p1, self.calib_p2 = start, end
+
+        def ok(vals):
+            try:
+                val = float(vals['len'])
+            except ValueError:
+                return "길이를 숫자로 입력하세요."
+            if val <= 0:
+                return "길이는 0보다 커야 합니다."
+            # 측정 기준을 정하고, 도면도 실제 치수 크기로 맞춤
+            self.calib_px_per_mm = dist_px / val
+            self._set_all_drawings_real_size()
+            self.calib_notice = ""
+            self.calib_temp_data = (start, end, val)
+            self.calib_p1 = self.calib_p2 = None
+
+        def cancel():
+            self.calib_p1 = self.calib_p2 = None
+
+        self._form("캘리브레이션", [{'key': 'len', 'label': '실제 길이 (mm)', 'value': ''}], ok,
+                   text=f"그린 기준선: {dist_px:.1f} px\n이 선의 실제 길이를 입력하세요.", on_cancel=cancel)
 
     def _handle_button(self, m):
         """버튼 클릭 처리 분리"""
@@ -1988,7 +2177,7 @@ class VisionInspector:
             # 카메라 드라이버의 설정 창 (초점, 노출, 선명도 등) - 지원하는 카메라만 열림
             if self.cap is not None and self.loaded_frame is None:
                 if not self.cap.set(cv2.CAP_PROP_SETTINGS, 1):
-                    messagebox.showinfo("카메라 설정", "이 카메라는 설정 창을 지원하지 않습니다.")
+                    self._message("카메라 설정", "이 카메라는 설정 창을 지원하지 않습니다.")
 
         elif m == 'VIEW_FIT':
             self._reset_view()
@@ -2012,14 +2201,13 @@ class VisionInspector:
                 unit = max(1.0, self.frame_w / self.view_w)
                 self._draw_overlays(full, lambda p: np.asarray(p, dtype=np.float64), unit, live=False)
                 self.draw_weight_overlay(full, unit)
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
+                root = self._dialog_root()
                 path = filedialog.asksaveasfilename(
                     defaultextension=".jpg",
                     initialfile=f'검사결과_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg',
                     parent=root
                 )
+                root.destroy()
                 if path:
                     try:
                         res, buffer = cv2.imencode('.jpg', full,
@@ -2027,15 +2215,12 @@ class VisionInspector:
                         if res:
                             with open(path, "wb") as f:
                                 f.write(buffer.tobytes())
-                            messagebox.showinfo("저장 완료", "이미지가 성공적으로 저장되었습니다.", parent=root)
+                            self._message("저장 완료", "이미지가 성공적으로 저장되었습니다.")
                     except Exception as ex:
-                        messagebox.showerror("저장 실패", f"저장 오류:\n{ex}", parent=root)
-                root.destroy()
+                        self._message("저장 실패", f"저장 오류:\n{ex}")
 
         elif m == 'LOAD_DXF':
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
+            root = self._dialog_root()
             path = filedialog.askopenfilename(filetypes=[("DXF 도면", "*.dxf")], parent=root)
             root.destroy()
             if path:
@@ -2049,18 +2234,24 @@ class VisionInspector:
         elif m == 'DXF_DEL':
             i = self.dxf_active
             if i is None or not (0 <= i < len(self.drawings)):
-                messagebox.showinfo("도면 빼기", "화면에 불러온 도면이 없습니다.")
-            elif messagebox.askyesno("도면 빼기",
-                                     f"도면 {i + 1} ({self.drawings[i]['name']})을 화면에서 뺄까요?\n"
-                                     "(DXF 파일은 지워지지 않습니다)"):
-                self.drawings.pop(i)
-                self.dxf_active = min(i, len(self.drawings) - 1) if self.drawings else None
+                self._message("도면 빼기", "화면에 불러온 도면이 없습니다.")
+            else:
+                target = self.drawings[i]
+
+                def remove():
+                    if target in self.drawings:
+                        j = self.drawings.index(target)
+                        self.drawings.pop(j)
+                        self.dxf_active = min(j, len(self.drawings) - 1) if self.drawings else None
+
+                self._confirm("도면 빼기", f"도면 {i + 1} ({target['name']})을 화면에서 뺄까요?\n"
+                                         "(DXF 파일은 지워지지 않습니다)", remove)
 
         elif m == 'DXF_REAL':
             if self.calib_px_per_mm:
                 self._set_all_drawings_real_size()
             else:
-                messagebox.showinfo("도면 실측크기", "먼저 캘리브레이션을 해야 도면을 실제 치수로 표시할 수 있습니다.")
+                self._message("도면 실측크기", "먼저 캘리브레이션을 해야 도면을 실제 치수로 표시할 수 있습니다.")
 
         elif m == 'CLEAR':
             self.measurements = []
@@ -2075,10 +2266,10 @@ class VisionInspector:
         elif m == 'SCALE_CONNECT':
             if self.scale_connected:
                 self.disconnect_scale()
-                messagebox.showinfo("저울", "저울 연결을 해제했습니다.")
+                self._message("저울", "저울 연결을 해제했습니다.")
             else:
                 if not SERIAL_AVAILABLE:
-                    messagebox.showinfo(
+                    self._message(
                         "저울 연결",
                         "저울이 연결되어 있지 않습니다.\n\n"
                         "실제 저울 연결 방법:\n"
@@ -2090,19 +2281,12 @@ class VisionInspector:
                 else:
                     ports = [p.device for p in serial.tools.list_ports.comports()]
                     if not ports:
-                        messagebox.showwarning("저울", "연결된 COM 포트가 없습니다.")
+                        self._message("저울", "연결된 COM 포트가 없습니다.")
                         return
-                    root = tk.Tk()
-                    root.withdraw()
-                    root.attributes("-topmost", True)
-                    port = simpledialog.askstring(
-                        "저울 연결",
-                        f"COM 포트를 입력하세요:\n사용 가능: {', '.join(ports)}",
-                        parent=root
-                    )
-                    root.destroy()
-                    if port:
-                        self.connect_scale(port.strip().upper())
+                    # 포트를 직접 입력하지 않고 목록에서 고름 (기존 기록에 있던 COM4가 있으면 먼저 선택)
+                    self._pick("저울 연결", ports, lambda i: self.connect_scale(ports[i]),
+                               sel=ports.index('COM4') if 'COM4' in ports else 0,
+                               text="저울이 연결된 COM 포트를 고르세요.")
 
         elif m == 'SCALE_SAVE':
             self.save_weight()
@@ -2176,7 +2360,11 @@ class VisionInspector:
 
             cv2.imshow('Vision Inspector', display_img)
             window_shown = True
-            key = cv2.waitKey(1) & 0xFF
+            key_ex = cv2.waitKeyEx(1)
+            if key_ex != -1 and self._modal is not None:
+                self._modal_key(key_ex)   # 입력판이 열려 있으면 키보드는 입력판으로
+                continue
+            key = key_ex & 0xFF
             if key == ord('q'):
                 break
             elif key in (ord('f'), ord('F')):
