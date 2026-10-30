@@ -19,8 +19,36 @@ except ImportError:
 
 
 class VisionInspector:
+    # ──────────────────────────────────────────────
+    # 여러 도면: 도면마다 위치·회전·배율·색을 따로 가짐.
+    # self.scale / angle / offset_x / offset_y / idx_dxf_color / dxf_contours 는
+    # '지금 선택된 도면'의 값을 가리킴 (도면이 없으면 기본값 저장소 _nodwg)
+    # ──────────────────────────────────────────────
+    DXF_COLOR_ORDER = [0, 4, 2, 1, 3]   # 새 도면 색 순서: 초록, 흰색, 파랑, 빨강, 노랑
+
+    def _dwg(self):
+        if self.dxf_active is not None and 0 <= self.dxf_active < len(self.drawings):
+            return self.drawings[self.dxf_active]
+        return self._nodwg
+
+    def _dwg_prop(key):
+        return property(lambda self: self._dwg()[key],
+                        lambda self, v: self._dwg().__setitem__(key, v))
+
+    scale = _dwg_prop('scale')              # 도면 표시 배율 (px/mm) - 도면 확대/축소 시 바뀜
+    angle = _dwg_prop('angle')
+    offset_x = _dwg_prop('offset_x')        # 화면 중심 기준 이동량 (원본 px)
+    offset_y = _dwg_prop('offset_y')
+    idx_dxf_color = _dwg_prop('color_idx')
+    dxf_contours = property(lambda self: self._dwg()['contours'])
+    del _dwg_prop
+
     def __init__(self, dxf_path=""):
         self.dxf_path = dxf_path
+        self.drawings = []        # [{'name', 'contours', 'scale', 'angle', 'offset_x', 'offset_y', 'color_idx'}]
+        self.dxf_active = None    # 선택된 도면 번호
+        self._nodwg = {'name': '', 'contours': [], 'scale': 1.0, 'angle': 0.0,
+                       'offset_x': 0.0, 'offset_y': 0.0, 'color_idx': 0}
         self.current_cam_idx = 0
         self.cap = self.auto_scan_and_connect(0)
         if self.cap is None:
@@ -81,8 +109,10 @@ class VisionInspector:
             'SWITCH_CAM': '카메라 전환',
             'FREEZE_LIVE': '정지 / 라이브',
             'LOAD_IMAGE': '사진 불러오기',
-            'LOAD_DXF': '도면 불러오기',
+            'LOAD_DXF': '도면 추가',
             'DXF_COLOR': '도면 색상',
+            'DXF_NEXT': '도면 선택 전환',
+            'DXF_DEL': '도면 빼기',
             'PAN': '이동 (PAN)',
             'ZOOM': '확대 / 축소',
             'ZOOM_IN': '확대 +',
@@ -105,6 +135,8 @@ class VisionInspector:
             'CAM_SETTINGS': '카메라 설정',
             'VIEW_FIT': '화면 맞춤',
             'EDGE_SNAP': '경계 맞춤',
+            'TPL_ADD': '도형 추가',
+            'TPL_EDIT': '도형 치수/삭제',
             'QUIT': '종료'
         }
 
@@ -116,7 +148,7 @@ class VisionInspector:
             },
             {
                 'title': '도면 관리',
-                'buttons': [['LOAD_DXF', 'DXF_COLOR']]
+                'buttons': [['LOAD_DXF', 'DXF_COLOR'], ['DXF_NEXT', 'DXF_DEL']]
             },
             {
                 'title': '뷰 조작',
@@ -137,6 +169,10 @@ class VisionInspector:
                 ]
             },
             {
+                'title': '기준 도형',
+                'buttons': [['TPL_ADD', 'TPL_EDIT']]
+            },
+            {
                 'title': '캘리브레이션',
                 'buttons': [['CALIB', 'CALIB_COLOR']]
             },
@@ -155,8 +191,6 @@ class VisionInspector:
         self.bottom_area_height = 250
 
         # 카메라 설정 먼저 (view_h 정의)
-        self.dxf_contours = []   # 각 원소: (ctype, pts_array)
-        self.dxf_real_width = 0
         self.setup_camera()
 
         # 버튼 초기화
@@ -184,6 +218,11 @@ class VisionInspector:
         self.crosshairs = []           # 배치된 십자선 리스트: [(x, y, angle, size), ...]
         self.cross_edit_idx = None     # 현재 조정 중인 십자선 인덱스
         self.cross_selected_idx = None # 선택된 십자선 인덱스
+        # 기준 도형: [{'type': 'circle'|'rect'|'line', 'w': mm, 'h': mm, 'angle': 도, 'cx', 'cy': 원본 px}, ...]
+        self.templates = []
+        self.tpl_selected = None
+        self.tpl_color = (255, 0, 255)  # 자홍색 (BGR)
+        self._dialog_open = False       # 입력창이 떠 있는 동안 마우스 이벤트 무시
 
         # 저울 관련 초기화
         self.scale_weight = None          # 현재 무게값 (g)
@@ -648,17 +687,29 @@ class VisionInspector:
             all_pts = np.array(all_pts, dtype=np.float32)
             center = np.mean(all_pts, axis=0)
 
-            # AutoCAD Y축(위=+) → 화면 Y축(아래=+) 변환을 위해 Y 반전
-            self.dxf_contours = [(ctype, (pts - center) * [1, -1]) for ctype, pts in contours]
-            self.dxf_real_width = (np.max(all_pts[:, 0]) - np.min(all_pts[:, 0]))
-
+            real_width = float(np.max(all_pts[:, 0]) - np.min(all_pts[:, 0]))
             if self.calib_px_per_mm:
                 # 캘리브레이션이 되어 있으면 도면을 실제 치수 크기로 표시
-                self.scale = self.calib_px_per_mm
-            elif self.scale <= 1.1 and self.dxf_real_width > 0:
-                # 미보정 상태에서는 모양 확인용으로 화면에 적당한 크기로 표시
-                ref_w = self.cam_w if 0 < self.cam_w <= 1920 else self.view_w
-                self.scale = (ref_w * 0.4) / self.dxf_real_width
+                scale = self.calib_px_per_mm
+            elif self.drawings:
+                # 미보정: 이미 불러온 도면과 같은 배율로 (도면끼리 크기 비교가 맞도록)
+                scale = self.scale
+            else:
+                # 미보정 첫 도면: 모양 확인용으로 영상 폭의 40% 크기로 표시
+                scale = (self.frame_w * 0.4) / real_width if real_width > 0 else 1.0
+
+            # 새 도면은 지금 보고 있는 화면 가운데에 추가 (기존 도면은 그대로 둠)
+            self.drawings.append({
+                'name': os.path.basename(path),
+                # AutoCAD Y축(위=+) → 화면 Y축(아래=+) 변환을 위해 Y 반전
+                'contours': [(ctype, (pts - center) * [1, -1]) for ctype, pts in contours],
+                'scale': scale,
+                'angle': 0.0,
+                'offset_x': self.view_cx - self.frame_w / 2.0,
+                'offset_y': self.view_cy - self.frame_h / 2.0,
+                'color_idx': self.DXF_COLOR_ORDER[len(self.drawings) % len(self.DXF_COLOR_ORDER)],
+            })
+            self.dxf_active = len(self.drawings) - 1
 
             # 로드 성공 메시지 (엔티티 수 표시)
             counts = {}
@@ -668,6 +719,7 @@ class VisionInspector:
             summary = '\n'.join(f"  {k}: {v}개" for k, v in sorted(counts.items()))
             messagebox.showinfo(
                 "DXF 로드 완료",
+                f"도면 {len(self.drawings)}: {os.path.basename(path)}\n"
                 f"도형 {len(contours)}개 로드됨\n\n엔티티 구성:\n{summary}"
             )
 
@@ -681,9 +733,9 @@ class VisionInspector:
     # ──────────────────────────────────────────────
     def init_buttons(self):
         # 버튼이 모두 들어가도록 간격을 촘촘하게 (높이 900 기준 하단 확대경 영역 위까지)
-        btn_h = 28
+        btn_h = 24
         margin_x = 8
-        margin_y = 4
+        margin_y = 3
         section_h = 16
         section_gap = 4
         start_y = 68
@@ -815,8 +867,21 @@ class VisionInspector:
             warnings.append("미보정: 측정값은 px 단위입니다. 캘리브레이션을 하세요.")
             if self.calib_notice:
                 warnings.append(self.calib_notice)
-        if self.dxf_contours and self.calib_px_per_mm and not self._dxf_is_real_size():
-            warnings.append(f"도면 배율 ≠ 실측 ({dxf_ratio * 100:.1f}%) - 모양 비교용입니다. '도면 실측크기'로 복귀")
+        if self.templates and not self.calib_px_per_mm:
+            warnings.append("기준 도형은 캘리브레이션 후에 표시됩니다.")
+        not_real = self._dxf_not_real()
+        if not_real:
+            which = ", ".join(f"도면 {i + 1}: {r * 100:.1f}%" for i, r in not_real)
+            warnings.append(f"도면 배율 ≠ 실측 ({which}) - 모양 비교용입니다. '도면 실측크기'로 복귀")
+        # 불러온 도면 목록 (영상 오른쪽 위, 도면 색으로 / 선택된 도면은 ▶)
+        for i, d in enumerate(self.drawings):
+            text = f"{'▶ ' if i == self.dxf_active else ''}도면 {i + 1}: {d['name'][:28]}"
+            ty = self.cam_y_offset + 10 + i * 20
+            bx1, by1, bx2, by2 = draw.textbbox((0, ty), text, font=font_btn)
+            tx = self.view_w - 12 - (bx2 - bx1)
+            draw.rectangle((tx - 4, by1 - 2, self.view_w - 8, by2 + 2), fill=(70, 70, 70))
+            draw.text((tx, ty), text, font=font_btn, fill=self.color_palette[d['color_idx']])
+
         for i, text in enumerate(warnings):
             wy = self.cam_y_offset + 10 + i * 24
             tx1, ty1, tx2, ty2 = draw.textbbox((12, wy), text, font=font_section_warn)
@@ -837,7 +902,7 @@ class VisionInspector:
             label = self.btn_labels.get(mode, mode)
             if mode == 'EDGE_SNAP':
                 label = f"경계 맞춤: {'켬' if self.edge_snap else '끔'}  (E)"
-            draw.text((x1 + 8, y1 + 7), label, font=font_btn, fill=txt_fill)
+            draw.text((x1 + 8, y1 + 5), label, font=font_btn, fill=txt_fill)
 
         # ── 상태 텍스트 ───────────────────────────
         if self.loaded_frame is not None:
@@ -849,12 +914,13 @@ class VisionInspector:
             f"상태: {source} (카메라 {self.current_cam_idx})",
             f"해상도: {self.frame_w}x{self.frame_h}",
             f"영상 확대: {self.view_zoom:.1f}배",
-            f"도면배율: {self.scale:.3f}px/mm",
-            f"회전: {self.angle:.1f}°",
+            (f"도면{self.dxf_active + 1} 배율: {self.scale:.3f}px/mm" if self.drawings
+             else "도면: 없음"),
+            f"도면 회전: {self.angle:.1f}°" if self.drawings else f"도면: {len(self.drawings)}개",
             f"측정: {len(self.measurements)}개",
             f"십자선: {len(self.crosshairs)}개",
             f"저울: {self.scale_error[:24] if self.scale_error else ('연결' if self.scale_connected else '미연결')}",
-            f"저장: {len(self.weight_log)}건",
+            f"기준도형: {len(self.templates)}개",
         ]
         y_pos = mag_y2 + 10
         for i, text in enumerate(status_texts):
@@ -864,7 +930,8 @@ class VisionInspector:
                 y_pos += 15
 
         # ── 영상 조작 안내 (영상 아래 여백) ──
-        hint = "휠: 영상 확대/축소   오른쪽 버튼 드래그: 영상 이동   오른쪽 더블클릭 / F: 화면 맞춤   E: 경계 맞춤 켬/끔"
+        hint = ("휠: 영상 확대/축소   오른쪽 버튼 드래그: 영상 이동   오른쪽 더블클릭 / F: 화면 맞춤   "
+                "E: 경계 맞춤 켬/끔   기준 도형 더블클릭: 치수 변경")
         hy = min(self.view_h - 20, self.cam_y_offset + self.cam_display_h + 6)
         draw.text((12, hy), hint, font=font_status, fill=self.clr_text_dim)
 
@@ -1046,6 +1113,219 @@ class VisionInspector:
         snapped = self._snap_to_edge(fx, fy)
         return snapped if snapped is not None else (fx, fy)
 
+    # ──────────────────────────────────────────────
+    # 여러 도면 도우미
+    # ──────────────────────────────────────────────
+    def _dwg_frame_contours(self, d):
+        """도면 d의 윤곽선을 원본 프레임 좌표로 변환 [(ctype, pts), ...]"""
+        rad = np.radians(d['angle'])
+        rot = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
+        c = np.array([self.frame_w / 2.0 + d['offset_x'], self.frame_h / 2.0 + d['offset_y']])
+        return [(ctype, (pts @ rot.T) * d['scale'] + c) for ctype, pts in d['contours']]
+
+    def _drawing_hit(self, fx, fy):
+        """클릭 위치에서 화면 기준 10픽셀 이내에 선이 지나가는 도면 번호 (가장 가까운 것). 없으면 None"""
+        tol = 10.0 / self._view_scale()
+        p = np.array([fx, fy])
+        best, best_d = None, tol
+        for i, d in enumerate(self.drawings):
+            for ctype, pts in self._dwg_frame_contours(d):
+                a = pts if ctype == 'poly' else pts[:-1]
+                b = np.roll(pts, -1, axis=0) if ctype == 'poly' else pts[1:]
+                ab = b - a
+                u = np.clip(np.einsum('ij,ij->i', p - a, ab) / np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-9), 0, 1)
+                dist = np.hypot(*(p - (a + u[:, None] * ab)).T).min()
+                if dist <= best_d:
+                    best, best_d = i, dist
+        return best
+
+    def _dxf_not_real(self):
+        """실제 치수와 다른 배율로 표시 중인 도면 [(번호, 비율), ...]"""
+        if not self.calib_px_per_mm:
+            return []
+        return [(i, d['scale'] / self.calib_px_per_mm) for i, d in enumerate(self.drawings)
+                if abs(d['scale'] / self.calib_px_per_mm - 1.0) >= 1e-6]
+
+    def _set_all_drawings_real_size(self):
+        """캘리브레이션 값으로 모든 도면을 실제 치수 크기로"""
+        for d in self.drawings + [self._nodwg]:
+            d['scale'] = self.calib_px_per_mm
+
+    # ──────────────────────────────────────────────
+    # 기준 도형 (치수를 입력한 원·사각형·직선을 실제 크기로 표시)
+    # ──────────────────────────────────────────────
+    TPL_NAMES = {'circle': '원', 'rect': '사각형', 'line': '직선'}
+
+    def _tpl_geometry(self, t):
+        """도형의 외곽선 점들(원본 px)과 닫힌 도형 여부. 캘리브레이션이 없으면 None"""
+        ppm = self.calib_px_per_mm
+        if not ppm:
+            return None
+        rad = np.radians(t['angle'])
+        rot = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
+        c = np.array([t['cx'], t['cy']])
+        if t['type'] == 'circle':
+            a = np.linspace(0, 2 * np.pi, 180, endpoint=False)
+            r = t['w'] / 2 * ppm
+            return np.column_stack([np.cos(a), np.sin(a)]) * r + c, True
+        if t['type'] == 'rect':
+            hw, hh = t['w'] / 2 * ppm, t['h'] / 2 * ppm
+            local = np.array([[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]])
+            return local @ rot.T + c, True
+        hl = t['w'] / 2 * ppm
+        return np.array([[-hl, 0.0], [hl, 0.0]]) @ rot.T + c, False
+
+    def _tpl_label(self, t):
+        # cv2.putText는 Ø 같은 기호가 깨지므로 영문 표기
+        if t['type'] == 'circle':
+            return f"D {t['w']:.3f}mm"
+        if t['type'] == 'rect':
+            return f"{t['w']:.3f} x {t['h']:.3f}mm"
+        return f"L {t['w']:.3f}mm"
+
+    def _template_hit(self, fx, fy):
+        """클릭 위치에서 가까운 기준 도형(테두리 또는 가운데) 번호. 없으면 None"""
+        tol = 10.0 / self._view_scale()   # 화면 기준 10픽셀 이내
+        best, best_d = None, tol
+        for i, t in enumerate(self.templates):
+            geo = self._tpl_geometry(t)
+            if geo is None:
+                continue
+            pts, closed = geo
+            p = np.array([fx, fy])
+            d = np.hypot(fx - t['cx'], fy - t['cy'])      # 가운데
+            segs = list(zip(pts, np.roll(pts, -1, axis=0))) if closed else [(pts[0], pts[1])]
+            for a, b in segs:                              # 테두리까지 거리
+                ab = b - a
+                u = np.clip(np.dot(p - a, ab) / max(np.dot(ab, ab), 1e-9), 0, 1)
+                d = min(d, np.hypot(*(p - (a + u * ab))))
+            if d <= best_d:
+                best, best_d = i, d
+        return best
+
+    def _template_dialog(self, initial=None):
+        """도형 종류·치수(mm)·각도 입력창. 결과 dict, 삭제면 'delete', 취소면 None"""
+        root = tk.Tk()
+        root.withdraw()
+        dlg = tk.Toplevel(root)
+        dlg.title("기준 도형 수정" if initial else "기준 도형 추가")
+        dlg.attributes("-topmost", True)
+        dlg.resizable(False, False)
+
+        kind = tk.StringVar(value=initial['type'] if initial else 'circle')
+        v_w = tk.StringVar(value=f"{initial['w']:g}" if initial else "")
+        v_h = tk.StringVar(value=f"{initial['h']:g}" if initial and initial['type'] == 'rect' else "")
+        v_a = tk.StringVar(value=f"{initial['angle']:g}" if initial else "0")
+        result = {'value': None}
+
+        box = tk.Frame(dlg, padx=14, pady=10)
+        box.pack()
+        row = tk.Frame(box)
+        row.grid(row=0, column=0, columnspan=2, pady=(0, 8))
+        for key in ('circle', 'rect', 'line'):
+            tk.Radiobutton(row, text=self.TPL_NAMES[key], variable=kind, value=key).pack(side='left', padx=6)
+        lbl_w = tk.Label(box, width=10, anchor='w')
+        lbl_w.grid(row=1, column=0, sticky='w')
+        e_w = tk.Entry(box, textvariable=v_w, width=12)
+        e_w.grid(row=1, column=1, pady=2)
+        tk.Label(box, text="세로 (mm)", width=10, anchor='w').grid(row=2, column=0, sticky='w')
+        e_h = tk.Entry(box, textvariable=v_h, width=12)
+        e_h.grid(row=2, column=1, pady=2)
+        tk.Label(box, text="각도 (°)", width=10, anchor='w').grid(row=3, column=0, sticky='w')
+        tk.Entry(box, textvariable=v_a, width=12).grid(row=3, column=1, pady=2)
+
+        def refresh(*_):
+            lbl_w.config(text={'circle': '지름 (mm)', 'rect': '가로 (mm)', 'line': '길이 (mm)'}[kind.get()])
+            e_h.config(state='normal' if kind.get() == 'rect' else 'disabled')
+        kind.trace_add('write', refresh)
+        refresh()
+
+        def ok(*_):
+            try:
+                w = float(v_w.get())
+                h = float(v_h.get()) if kind.get() == 'rect' else 0.0
+                ang = float(v_a.get() or 0)
+                if w <= 0 or (kind.get() == 'rect' and h <= 0):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("입력 오류", "치수는 0보다 큰 숫자로 입력하세요.", parent=dlg)
+                return
+            result['value'] = {'type': kind.get(), 'w': w, 'h': h, 'angle': ang % 360}
+            dlg.destroy()
+
+        def delete():
+            result['value'] = 'delete'
+            dlg.destroy()
+
+        btns = tk.Frame(box)
+        btns.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        tk.Button(btns, text="확인", width=8, command=ok).pack(side='left', padx=3)
+        if initial:
+            tk.Button(btns, text="삭제", width=8, command=delete).pack(side='left', padx=3)
+        tk.Button(btns, text="취소", width=8, command=dlg.destroy).pack(side='left', padx=3)
+        dlg.bind('<Return>', ok)
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+        e_w.focus_set()
+        dlg.grab_set()
+
+        self._dialog_open = True
+        try:
+            root.wait_window(dlg)
+        finally:
+            self._dialog_open = False
+            root.destroy()
+        return result['value']
+
+    def _add_template(self):
+        if not self.calib_px_per_mm:
+            messagebox.showinfo("기준 도형", "먼저 캘리브레이션을 하세요.\n기준 도형은 실제 치수(mm) 크기로 표시됩니다.")
+            return
+        res = self._template_dialog()
+        if not isinstance(res, dict):
+            return
+        res.update(cx=self.view_cx, cy=self.view_cy)   # 지금 보고 있는 화면 가운데에 배치
+        self.templates.append(res)
+        self.tpl_selected = len(self.templates) - 1
+        self.cross_selected_idx = self.cross_edit_idx = None
+        self.current_mode = 'PAN'                        # 바로 끌어서 옮길 수 있게
+
+    def _edit_template(self, idx=None):
+        if idx is None:
+            idx = self.tpl_selected
+            if idx is None or not (0 <= idx < len(self.templates)):
+                idx = len(self.templates) - 1 if self.templates else None
+        if idx is None:
+            messagebox.showinfo("기준 도형", "수정할 기준 도형이 없습니다.\n'도형 추가'로 먼저 만드세요.")
+            return
+        res = self._template_dialog(self.templates[idx])
+        if res == 'delete':
+            self.templates.pop(idx)
+            self.tpl_selected = None
+        elif isinstance(res, dict):
+            self.templates[idx].update(res)
+            self.tpl_selected = idx
+
+    def _draw_templates(self, img, to_img, unit, live):
+        for i, t in enumerate(self.templates):
+            geo = self._tpl_geometry(t)
+            if geo is None:
+                continue
+            pts, closed = geo
+            selected = live and i == self.tpl_selected
+            color = (255, 255, 255) if selected else self.tpl_color
+            q = self._fix(to_img(pts)).reshape(-1, 1, 2)
+            cv2.polylines(img, [q], closed, color, max(1, int(round(unit))), cv2.LINE_AA, self.SHIFT)
+            # 가운데 표시 (작은 +)
+            c = to_img([(t['cx'], t['cy'])])[0]
+            arm = 5 * unit
+            cv2.line(img, (int(c[0] - arm), int(c[1])), (int(c[0] + arm), int(c[1])), color, 1, cv2.LINE_AA)
+            cv2.line(img, (int(c[0]), int(c[1] - arm)), (int(c[0]), int(c[1] + arm)), color, 1, cv2.LINE_AA)
+            if selected:
+                cv2.circle(img, (int(c[0]), int(c[1])), 9, color, 1, cv2.LINE_AA)
+            # 치수 글자: 도형 오른쪽 위
+            anchor = pts[np.argmax(pts[:, 0] - pts[:, 1])]
+            self._text(img, to_img, anchor, self._tpl_label(t), color, unit, 0.45)
+
     def _font(self, name, size):
         """폰트를 매 프레임 다시 읽지 않도록 캐시"""
         key = (name, size)
@@ -1083,10 +1363,14 @@ class VisionInspector:
         self.scale = max(0.05, self.scale * 1.15 ** (delta_size / 0.35))
 
     def _apply_crosshair_rotation(self, delta_deg):
-        """선택된 십자선이 있으면 그 각도를, 없으면 도면 각도를 조절"""
+        """선택된 십자선(또는 기준 도형)이 있으면 그 각도를, 없으면 도면 각도를 조절"""
         idx = self.cross_selected_idx
         if idx is None or not (0 <= idx < len(self.crosshairs)):
-            self.angle = (self.angle + delta_deg) % 360
+            t = self.tpl_selected
+            if t is not None and 0 <= t < len(self.templates):
+                self.templates[t]['angle'] = (self.templates[t]['angle'] + delta_deg) % 360
+            else:
+                self.angle = (self.angle + delta_deg) % 360
             return
         px, py, pangle, psize = self.crosshairs[idx]
         new_angle = (pangle + delta_deg) % 360
@@ -1125,20 +1409,25 @@ class VisionInspector:
 
     def _draw_overlays(self, img, to_img, unit=1.0, live=True):
         """도면, 캘리브레이션 선, 측정선, 십자선을 그림. live=True면 마우스 미리보기도 그림"""
-        rad = np.radians(self.angle)
-        rot_m = np.array([[np.cos(rad), -np.sin(rad)],
-                          [np.sin(rad),  np.cos(rad)]])
-        dxf_clr = self.color_palette[self.idx_dxf_color]
         meas_clr = self.color_palette[self.idx_meas_color]
         calib_clr = self.color_palette[self.idx_calib_color]
         thick = max(1, int(round(unit)))
 
-        # ── DXF 도면 ──
-        cx = self.frame_w / 2.0 + self.offset_x
-        cy = self.frame_h / 2.0 + self.offset_y
-        for ctype, pts in self.dxf_contours:
-            pts_img = self._fix(to_img((pts @ rot_m.T) * self.scale + [cx, cy])).reshape(-1, 1, 2)
-            cv2.polylines(img, [pts_img], ctype == 'poly', dxf_clr, thick, cv2.LINE_AA, self.SHIFT)
+        # ── DXF 도면 (여러 개, 각자 위치·회전·배율·색) ──
+        for i, d in enumerate(self.drawings):
+            color = self.color_palette[d['color_idx']]
+            top_left = None
+            for ctype, pts in self._dwg_frame_contours(d):
+                pts_img = self._fix(to_img(pts)).reshape(-1, 1, 2)
+                cv2.polylines(img, [pts_img], ctype == 'poly', color, thick, cv2.LINE_AA, self.SHIFT)
+                corner = pts.min(axis=0)
+                top_left = corner if top_left is None else np.minimum(top_left, corner)
+            if top_left is not None and len(self.drawings) > 1:
+                # 도면 번호 표시 (선택된 도면은 [#n])
+                label = f"[#{i + 1}]" if (live and i == self.dxf_active) else f"#{i + 1}"
+                q = to_img([top_left])[0]
+                cv2.putText(img, label, (int(q[0]), int(q[1]) - int(6 * unit)), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5 * unit, color, max(1, int(round(unit))), cv2.LINE_AA)
 
         # ── 캘리브 고정선 ──
         if self.fixed_calib_line:
@@ -1158,7 +1447,8 @@ class VisionInspector:
             self._point_mark(img, to_img, m2, meas_clr, unit)
             self._text(img, to_img, pt, val_text, meas_clr, unit)
 
-        # ── 십자선 ──
+        # ── 기준 도형 · 십자선 ──
+        self._draw_templates(img, to_img, unit, live)
         self.draw_crosshair(img, to_img, unit, live)
 
         if not live:
@@ -1295,6 +1585,8 @@ class VisionInspector:
     # 마우스
     # ──────────────────────────────────────────────
     def mouse_callback(self, event, x, y, flags, param):
+        if self._dialog_open:   # 입력창이 떠 있는 동안 들어오는 마우스 이벤트는 무시
+            return
         self.curr_mx, self.curr_my = x, y
 
         self.hovered_button = None
@@ -1387,21 +1679,37 @@ class VisionInspector:
                 self._apply_crosshair_rotation(step * 3.0)
                 return
 
+        # 기준 도형 더블클릭 → 치수 변경
+        if (event == cv2.EVENT_LBUTTONDBLCLK and in_view
+                and self.current_mode in ['PAN', 'ZOOM', 'ROTATE']):
+            idx = self._template_hit(rx, ry)
+            if idx is not None:
+                self.is_dragging = False
+                self.tpl_selected = idx
+                self._edit_template(idx)
+                return
+
         if event == cv2.EVENT_LBUTTONDOWN and x <= self.view_w:
             if self.current_mode in ['PAN', 'ZOOM', 'ROTATE']:
                 self.is_dragging = True
                 self.lmx, self.lmy = x, y
+                best_idx = None
                 if self.crosshairs:
-                    best_idx = None
                     best_dist = 12 / self._view_scale()   # 화면 기준 12픽셀 이내
                     for idx, (cx, cy, _, _) in enumerate(self.crosshairs):
                         dist = np.hypot(rx - cx, ry - cy)
                         if dist < best_dist:
                             best_dist = dist
                             best_idx = idx
-                    # 십자선 근처를 누르면 십자선 편집, 빈 곳을 누르면 도면 편집
-                    self.cross_selected_idx = best_idx
-                    self.cross_edit_idx = best_idx
+                # 십자선 근처 → 십자선, 기준 도형 테두리/가운데 → 도형, 빈 곳 → 도면 편집
+                self.cross_selected_idx = best_idx
+                self.cross_edit_idx = best_idx
+                self.tpl_selected = self._template_hit(rx, ry) if best_idx is None else None
+                if best_idx is None and self.tpl_selected is None:
+                    # 도면 선 위를 누르면 그 도면을 선택 (빈 곳이면 지금 선택된 도면을 그대로 조작)
+                    hit = self._drawing_hit(rx, ry)
+                    if hit is not None:
+                        self.dxf_active = hit
                 return
             if self.current_mode == 'CROSS':
                 self.crosshairs.append((rx, ry, self.cross_angle, self.cross_size))
@@ -1449,12 +1757,18 @@ class VisionInspector:
             else:
                 dx = (x - self.lmx) / self._view_scale()   # 화면 이동량 → 원본 픽셀 이동량
                 dy = (y - self.lmy) / self._view_scale()
+                tpl = (self.templates[self.tpl_selected]
+                       if self.tpl_selected is not None and 0 <= self.tpl_selected < len(self.templates)
+                       else None)
                 if self.current_mode == 'PAN':
                     if self.crosshairs and self.cross_selected_idx is not None:
                         idx = self.cross_selected_idx
                         if 0 <= idx < len(self.crosshairs):
                             px, py, pangle, psize = self.crosshairs[idx]
                             self.crosshairs[idx] = (px + dx, py + dy, pangle, psize)
+                    elif tpl is not None:
+                        tpl['cx'] += dx
+                        tpl['cy'] += dy
                     else:
                         self.offset_x += dx
                         self.offset_y += dy
@@ -1472,6 +1786,8 @@ class VisionInspector:
                         else:
                             self.scale *= (1 - (y - self.lmy) * 0.005)
                             self.scale = max(0.05, self.scale)
+                    elif tpl is not None:
+                        pass   # 기준 도형은 입력한 치수로 고정 (크기 변경은 치수 입력으로)
                     else:
                         self.scale *= (1 - (y - self.lmy) * 0.005)
                         self.scale = max(0.05, self.scale)
@@ -1482,6 +1798,8 @@ class VisionInspector:
                             px, py, pangle, psize = self.crosshairs[idx]
                             new_angle = (pangle + (x - self.lmx) * 0.2) % 360
                             self.crosshairs[idx] = (px, py, new_angle, psize)
+                    elif tpl is not None:
+                        tpl['angle'] = (tpl['angle'] + (x - self.lmx) * 0.2) % 360
                     else:
                         self.angle += (x - self.lmx) * 0.2
                 self.lmx, self.lmy = x, y
@@ -1503,7 +1821,7 @@ class VisionInspector:
                     if val and val > 0:
                         # 측정 기준을 정하고, 도면도 실제 치수 크기로 맞춤
                         self.calib_px_per_mm = dist_px / val
-                        self.scale = self.calib_px_per_mm
+                        self._set_all_drawings_real_size()
                         self.calib_notice = ""
                         self.calib_temp_data = (calib_start, calib_end, val)
             self.is_dragging = False
@@ -1569,6 +1887,12 @@ class VisionInspector:
         elif m == 'VIEW_FIT':
             self._reset_view()
 
+        elif m == 'TPL_ADD':
+            self._add_template()
+
+        elif m == 'TPL_EDIT':
+            self._edit_template()
+
         elif m == 'EDGE_SNAP':
             self.edge_snap = not self.edge_snap
 
@@ -1608,9 +1932,24 @@ class VisionInspector:
             if path:
                 self.load_dxf_action(path)
 
+        elif m == 'DXF_NEXT':
+            if self.drawings:
+                cur = self.dxf_active if self.dxf_active is not None else -1
+                self.dxf_active = (cur + 1) % len(self.drawings)
+
+        elif m == 'DXF_DEL':
+            i = self.dxf_active
+            if i is None or not (0 <= i < len(self.drawings)):
+                messagebox.showinfo("도면 빼기", "화면에 불러온 도면이 없습니다.")
+            elif messagebox.askyesno("도면 빼기",
+                                     f"도면 {i + 1} ({self.drawings[i]['name']})을 화면에서 뺄까요?\n"
+                                     "(DXF 파일은 지워지지 않습니다)"):
+                self.drawings.pop(i)
+                self.dxf_active = min(i, len(self.drawings) - 1) if self.drawings else None
+
         elif m == 'DXF_REAL':
             if self.calib_px_per_mm:
-                self.scale = self.calib_px_per_mm
+                self._set_all_drawings_real_size()
             else:
                 messagebox.showinfo("도면 실측크기", "먼저 캘리브레이션을 해야 도면을 실제 치수로 표시할 수 있습니다.")
 
@@ -1619,6 +1958,8 @@ class VisionInspector:
             self.measure_p1 = None
             self.measure_p2 = None
             self.crosshairs = []
+            self.templates = []
+            self.tpl_selected = None
             self.fixed_calib_line = None
             self.calib_temp_data = None
 
