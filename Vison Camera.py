@@ -18,6 +18,16 @@ except ImportError:
     SERIAL_AVAILABLE = False
 
 
+# ──────────────────────────────────────────────
+# 제품 게이지 목록 (모든 PC 공통) - 제품명, 높이(mm)
+# 제품을 추가·수정하려면 여기에 한 줄씩 적고 GitHub에 올리면 모든 PC에 적용됨
+# ──────────────────────────────────────────────
+PRODUCTS = [
+    ("고스트1.88", 8.0),
+]
+GAUGE_BAR_MM = 3.0   # 제품 게이지 평행선 길이 (mm)
+
+
 class VisionInspector:
     # ──────────────────────────────────────────────
     # 여러 도면: 도면마다 위치·회전·배율·색을 따로 가짐.
@@ -137,6 +147,7 @@ class VisionInspector:
             'EDGE_SNAP': '경계 맞춤',
             'TPL_ADD': '도형 추가',
             'TPL_EDIT': '도형 치수/삭제',
+            'TPL_GAUGE': '제품 게이지',
             'QUIT': '종료'
         }
 
@@ -170,7 +181,7 @@ class VisionInspector:
             },
             {
                 'title': '기준 도형',
-                'buttons': [['TPL_ADD', 'TPL_EDIT']]
+                'buttons': [['TPL_ADD', 'TPL_EDIT'], ['TPL_GAUGE']]
             },
             {
                 'title': '캘리브레이션',
@@ -188,7 +199,7 @@ class VisionInspector:
         self.buttons = {}
         self.section_headers = {}
 
-        self.bottom_area_height = 250
+        self.bottom_area_height = 224   # 확대경 + 상태 표시 영역
 
         # 카메라 설정 먼저 (view_h 정의)
         self.setup_camera()
@@ -797,8 +808,8 @@ class VisionInspector:
         cv2.line(display_img, (self.view_w, bottom_start_y), (self.total_w, bottom_start_y), self.clr_border, 2)
 
         # 확대경 (마우스 주변 원본 픽셀을 그대로 크게 보여줌)
-        mag_size = 140
-        mag_y1 = bottom_start_y + 16
+        mag_size = 120
+        mag_y1 = bottom_start_y + 14
         mag_y2 = mag_y1 + mag_size
         mag_x1 = self.view_w + (self.ui_w - mag_size) // 2
         mag_x2 = mag_x1 + mag_size
@@ -1157,31 +1168,53 @@ class VisionInspector:
     TPL_NAMES = {'circle': '원', 'rect': '사각형', 'line': '직선'}
 
     def _tpl_geometry(self, t):
-        """도형의 외곽선 점들(원본 px)과 닫힌 도형 여부. 캘리브레이션이 없으면 None"""
+        """도형을 이루는 선들 [(점들(원본 px), 닫힌 도형 여부), ...]. 캘리브레이션이 없으면 None"""
         ppm = self.calib_px_per_mm
         if not ppm:
             return None
         rad = np.radians(t['angle'])
         rot = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
         c = np.array([t['cx'], t['cy']])
+        place = lambda local: np.asarray(local, dtype=np.float64) @ rot.T + c
         if t['type'] == 'circle':
             a = np.linspace(0, 2 * np.pi, 180, endpoint=False)
             r = t['w'] / 2 * ppm
-            return np.column_stack([np.cos(a), np.sin(a)]) * r + c, True
+            return [(np.column_stack([np.cos(a), np.sin(a)]) * r + c, True)]
         if t['type'] == 'rect':
             hw, hh = t['w'] / 2 * ppm, t['h'] / 2 * ppm
-            local = np.array([[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]])
-            return local @ rot.T + c, True
+            return [(place([[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]), True)]
+        if t['type'] == 'gauge':
+            # 제품 게이지: 길이 3mm 평행선 2개 (간격 = 제품 높이) + 두 평행선 가운데를 잇는 선
+            hb, hh = GAUGE_BAR_MM / 2 * ppm, t['w'] / 2 * ppm
+            return [(place([[-hb, -hh], [hb, -hh]]), False),
+                    (place([[-hb, hh], [hb, hh]]), False),
+                    (place([[0, -hh], [0, hh]]), False)]
         hl = t['w'] / 2 * ppm
-        return np.array([[-hl, 0.0], [hl, 0.0]]) @ rot.T + c, False
+        return [(place([[-hl, 0.0], [hl, 0.0]]), False)]
 
     def _tpl_label(self, t):
-        # cv2.putText는 Ø 같은 기호가 깨지므로 영문 표기
+        # cv2.putText는 Ø 같은 기호가 깨지므로 영문 표기 (제품 게이지는 한글 이름이라 별도로 그림)
         if t['type'] == 'circle':
             return f"D {t['w']:.3f}mm"
         if t['type'] == 'rect':
             return f"{t['w']:.3f} x {t['h']:.3f}mm"
+        if t['type'] == 'gauge':
+            return f"{t['name']} {t['w']:.3f}mm"
         return f"L {t['w']:.3f}mm"
+
+    def _pil_text(self, img, pos, text, color, size):
+        """한글이 들어간 글자를 영상의 글자 부분만 PIL로 그림 (cv2.putText는 한글이 깨짐)"""
+        font = self._font("malgunbd.ttf", max(8, int(size)))
+        x, y = int(pos[0]), int(pos[1])
+        bx1, by1, bx2, by2 = font.getbbox(text)
+        x1, y1 = max(0, x + bx1 - 2), max(0, y + by1 - 2)
+        x2, y2 = min(img.shape[1], x + bx2 + 2), min(img.shape[0], y + by2 + 2)
+        if x2 <= x1 or y2 <= y1:
+            return
+        roi = img[y1:y2, x1:x2]
+        pil = Image.fromarray(roi)
+        ImageDraw.Draw(pil).text((x - x1, y - y1), text, font=font, fill=color)
+        roi[:] = np.array(pil)
 
     def _template_hit(self, fx, fy):
         """클릭 위치에서 가까운 기준 도형(테두리 또는 가운데) 번호. 없으면 None"""
@@ -1191,10 +1224,11 @@ class VisionInspector:
             geo = self._tpl_geometry(t)
             if geo is None:
                 continue
-            pts, closed = geo
             p = np.array([fx, fy])
             d = np.hypot(fx - t['cx'], fy - t['cy'])      # 가운데
-            segs = list(zip(pts, np.roll(pts, -1, axis=0))) if closed else [(pts[0], pts[1])]
+            segs = []
+            for pts, closed in geo:
+                segs += list(zip(pts, np.roll(pts, -1, axis=0))) if closed else list(zip(pts[:-1], pts[1:]))
             for a, b in segs:                              # 테두리까지 거리
                 ab = b - a
                 u = np.clip(np.dot(p - a, ab) / max(np.dot(ab, ab), 1e-9), 0, 1)
@@ -1276,11 +1310,72 @@ class VisionInspector:
             root.destroy()
         return result['value']
 
-    def _add_template(self):
+    def _product_dialog(self, current=None):
+        """제품 목록에서 하나를 고르는 창. (제품명, 높이) / 삭제면 'delete' / 취소면 None"""
+        root = tk.Tk()
+        root.withdraw()
+        dlg = tk.Toplevel(root)
+        dlg.title("제품 게이지 변경" if current else "제품 게이지")
+        dlg.attributes("-topmost", True)
+        dlg.resizable(False, False)
+        result = {'value': None}
+
+        box = tk.Frame(dlg, padx=14, pady=10)
+        box.pack()
+        tk.Label(box, text=f"제품을 더블클릭하세요  (평행선 {GAUGE_BAR_MM:g}mm, 간격 = 제품 높이)").pack(anchor='w')
+        lb = tk.Listbox(box, width=34, height=min(12, max(4, len(PRODUCTS))), font=("맑은 고딕", 11),
+                        activestyle='dotbox', exportselection=False)
+        lb.pack(pady=6)
+        for name, height in PRODUCTS:
+            lb.insert('end', f"{name}   ({height:g} mm)")
+        names = [n for n, _ in PRODUCTS]
+        start = names.index(current) if current in names else 0
+        if PRODUCTS:
+            lb.selection_set(start)
+            lb.activate(start)
+            lb.see(start)
+
+        def ok(*_):
+            sel = lb.curselection()
+            if sel:
+                result['value'] = PRODUCTS[sel[0]]
+                dlg.destroy()
+
+        def delete():
+            result['value'] = 'delete'
+            dlg.destroy()
+
+        btns = tk.Frame(box)
+        btns.pack(pady=(4, 0))
+        tk.Button(btns, text="확인", width=8, command=ok).pack(side='left', padx=3)
+        if current:
+            tk.Button(btns, text="삭제", width=8, command=delete).pack(side='left', padx=3)
+        tk.Button(btns, text="취소", width=8, command=dlg.destroy).pack(side='left', padx=3)
+        lb.bind('<Double-Button-1>', ok)
+        dlg.bind('<Return>', ok)
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+        lb.focus_set()
+        dlg.grab_set()
+
+        self._dialog_open = True
+        try:
+            root.wait_window(dlg)
+        finally:
+            self._dialog_open = False
+            root.destroy()
+        return result['value']
+
+    def _add_template(self, gauge=False):
         if not self.calib_px_per_mm:
             messagebox.showinfo("기준 도형", "먼저 캘리브레이션을 하세요.\n기준 도형은 실제 치수(mm) 크기로 표시됩니다.")
             return
-        res = self._template_dialog()
+        if gauge:
+            picked = self._product_dialog()
+            if not picked:
+                return
+            res = {'type': 'gauge', 'name': picked[0], 'w': picked[1], 'h': GAUGE_BAR_MM, 'angle': 0.0}
+        else:
+            res = self._template_dialog()
         if not isinstance(res, dict):
             return
         res.update(cx=self.view_cx, cy=self.view_cy)   # 지금 보고 있는 화면 가운데에 배치
@@ -1297,12 +1392,18 @@ class VisionInspector:
         if idx is None:
             messagebox.showinfo("기준 도형", "수정할 기준 도형이 없습니다.\n'도형 추가'로 먼저 만드세요.")
             return
-        res = self._template_dialog(self.templates[idx])
+        t = self.templates[idx]
+        if t['type'] == 'gauge':
+            res = self._product_dialog(t['name'])   # 제품 게이지는 제품을 다시 골라서 변경
+            if isinstance(res, tuple):
+                res = {'name': res[0], 'w': res[1]}
+        else:
+            res = self._template_dialog(t)
         if res == 'delete':
             self.templates.pop(idx)
             self.tpl_selected = None
         elif isinstance(res, dict):
-            self.templates[idx].update(res)
+            t.update(res)
             self.tpl_selected = idx
 
     def _draw_templates(self, img, to_img, unit, live):
@@ -1310,11 +1411,12 @@ class VisionInspector:
             geo = self._tpl_geometry(t)
             if geo is None:
                 continue
-            pts, closed = geo
             selected = live and i == self.tpl_selected
             color = (255, 255, 255) if selected else self.tpl_color
-            q = self._fix(to_img(pts)).reshape(-1, 1, 2)
-            cv2.polylines(img, [q], closed, color, max(1, int(round(unit))), cv2.LINE_AA, self.SHIFT)
+            for pts, closed in geo:
+                q = self._fix(to_img(pts)).reshape(-1, 1, 2)
+                cv2.polylines(img, [q], closed, color, max(1, int(round(unit))), cv2.LINE_AA, self.SHIFT)
+            pts = np.vstack([p for p, _ in geo])
             # 가운데 표시 (작은 +)
             c = to_img([(t['cx'], t['cy'])])[0]
             arm = 5 * unit
@@ -1324,7 +1426,11 @@ class VisionInspector:
                 cv2.circle(img, (int(c[0]), int(c[1])), 9, color, 1, cv2.LINE_AA)
             # 치수 글자: 도형 오른쪽 위
             anchor = pts[np.argmax(pts[:, 0] - pts[:, 1])]
-            self._text(img, to_img, anchor, self._tpl_label(t), color, unit, 0.45)
+            if t['type'] == 'gauge':
+                q = to_img([anchor])[0]
+                self._pil_text(img, (q[0] + 6 * unit, q[1] - 18 * unit), self._tpl_label(t), color, 13 * unit)
+            else:
+                self._text(img, to_img, anchor, self._tpl_label(t), color, unit, 0.45)
 
     def _font(self, name, size):
         """폰트를 매 프레임 다시 읽지 않도록 캐시"""
@@ -1892,6 +1998,9 @@ class VisionInspector:
 
         elif m == 'TPL_EDIT':
             self._edit_template()
+
+        elif m == 'TPL_GAUGE':
+            self._add_template(gauge=True)
 
         elif m == 'EDGE_SNAP':
             self.edge_snap = not self.edge_snap
