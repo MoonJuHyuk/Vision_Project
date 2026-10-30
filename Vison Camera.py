@@ -1529,7 +1529,16 @@ class VisionInspector:
         f_small = self._font("malgun.ttf", 10)
         accent, panel, txt = (204, 122, 0), (48, 45, 45), (241, 241, 241)   # BGR 순서
         W, pad = self.MODAL_W, 18
-        text_lines = m['text'].split('\n') if m['text'] else []
+        text_lines = []
+        for line in (m['text'].split('\n') if m['text'] else []):
+            # 입력판 폭을 넘는 긴 줄(폴더 경로 등)은 다음 줄로 넘김
+            while line and draw.textbbox((0, 0), line, font=f_body)[2] > W - 2 * pad:
+                cut = len(line) - 1
+                while cut > 1 and draw.textbbox((0, 0), line[:cut], font=f_body)[2] > W - 2 * pad:
+                    cut -= 1
+                text_lines.append(line[:cut])
+                line = line[cut:]
+            text_lines.append(line)
         h = pad + 28 + len(text_lines) * 21 + (8 if text_lines else 0)
         if m['kind'] == 'form':
             h += (40 if m['radio_opts'] else 0) + len(m['fields']) * 38
@@ -2395,19 +2404,29 @@ class VisionInspector:
                 self.draw_weight_overlay(full, unit)
                 root = self._dialog_root()
                 path = filedialog.asksaveasfilename(
+                    title="검사 결과 이미지 저장",
                     defaultextension=".jpg",
+                    filetypes=[("JPG 이미지", "*.jpg"), ("PNG 이미지 (화질 손실 없음)", "*.png")],
                     initialfile=f'검사결과_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg',
+                    # 도면을 연 폴더가 아니라 마지막으로 이미지를 저장한 폴더에서 열기
+                    initialdir=getattr(self, 'last_save_dir', None),
                     parent=root
                 )
                 root.destroy()
                 if path:
+                    if os.path.splitext(path)[1].lower() not in ('.jpg', '.jpeg', '.png'):
+                        path += '.jpg'
+                    ext = os.path.splitext(path)[1].lower()
                     try:
-                        res, buffer = cv2.imencode('.jpg', full,
-                                                   [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                        params = [] if ext == '.png' else [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+                        res, buffer = cv2.imencode('.png' if ext == '.png' else '.jpg', full, params)
                         if res:
                             with open(path, "wb") as f:
                                 f.write(buffer.tobytes())
-                            self._message("저장 완료", "이미지가 성공적으로 저장되었습니다.")
+                            self.last_save_dir = os.path.dirname(path)
+                            self._message("저장 완료", f"이미지를 저장했습니다.\n\n폴더: {os.path.dirname(path)}\n"
+                                                    f"파일: {os.path.basename(path)}\n"
+                                                    f"크기: {full.shape[1]} x {full.shape[0]}")
                     except Exception as ex:
                         self._message("저장 실패", f"저장 오류:\n{ex}")
 
