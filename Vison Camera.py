@@ -30,6 +30,16 @@ PRODUCTS = [
 ]
 GAUGE_BAR_MM = 3.0   # 제품 게이지 평행선 길이 (mm)
 
+# ──────────────────────────────────────────────
+# 측정 기준 그림 목록 (모든 PC 공통) - 표시 이름, references 폴더의 파일 이름
+# 그림 파일을 references 폴더에 넣고 여기에 한 줄 추가 → GitHub에 올리면 모든 PC에 적용
+# 파일 이름은 영문·숫자로 (인터넷 주소에 쓰이므로)
+# ──────────────────────────────────────────────
+REFERENCES = [
+    ("측정 기준 (예시)", "ref_example.png"),
+]
+REFERENCE_URL = "https://raw.githubusercontent.com/MoonJuHyuk/Vision_Project/main/references/"
+
 
 class VisionInspector:
     # ──────────────────────────────────────────────
@@ -91,6 +101,15 @@ class VisionInspector:
         self._font_cache = {}
         self._modal = None                # 화면 안 입력판 (열려 있으면 다른 조작은 막음)
         self._modal_hits = []
+        # 측정 기준 창 (영상 위에 띄우는 그림, 접기/펴기·끌어서 이동)
+        self.ref_open = False
+        self.ref_idx = 0
+        self.ref_width = 380              # 그림 폭 (화면 픽셀)
+        self.ref_pos = None               # 창 왼쪽 위 (화면 좌표), 처음엔 영상 왼쪽 아래
+        self.ref_dragging = None          # 끌기 시작점과 창 위치의 차이
+        self._ref_images = {}             # 파일 이름 → 그림 (None = 불러오는 중, False = 실패)
+        self._ref_hits = []
+        self._ref_rect = None
         self.view_w, self.ui_w = 1200, 340
         self.total_w = self.view_w + self.ui_w
 
@@ -843,6 +862,9 @@ class VisionInspector:
                                      (cx_m - gap, cy_m, cx_m - 2, cy_m), (cx_m + 2, cy_m, cx_m + gap, cy_m)):
                 cv2.line(display_img, (ax, ay), (bx, by), (0, 255, 0), 1)
 
+        # 측정 기준 창 (그림)
+        self._draw_ref_panel_img(display_img)
+
         # PIL 텍스트
         img_pil = Image.fromarray(display_img)
         draw = ImageDraw.Draw(img_pil)
@@ -944,9 +966,11 @@ class VisionInspector:
 
         # ── 영상 조작 안내 (영상 아래 여백) ──
         hint = ("휠: 영상 확대/축소   오른쪽 버튼 드래그: 영상 이동   오른쪽 더블클릭 / F: 화면 맞춤   "
-                "E: 경계 맞춤 켬/끔   기준 도형 더블클릭: 치수 변경")
+                "E: 경계 맞춤   R: 측정 기준 접기/펴기   기준 도형 더블클릭: 치수 변경")
         hy = min(self.view_h - 20, self.cam_y_offset + self.cam_display_h + 6)
         draw.text((12, hy), hint, font=font_status, fill=self.clr_text_dim)
+
+        self._draw_ref_panel_text(draw)
 
         if self.camera_list_visible:
             self._draw_camera_list(display_img, draw, font_section, font_status)
@@ -1594,6 +1618,169 @@ class VisionInspector:
             draw.text((x0 + pad, y + 40), hint, font=f_small, fill=(150, 150, 150))
         self._modal_hits = hits
 
+    # ──────────────────────────────────────────────
+    # 측정 기준 창 (제품별 측정 기준 그림을 영상 위에 띄움)
+    #   제목줄 끌기: 이동 / 이름 클릭: 제품 선택 / −,+: 크기 / 접기·펴기 (R 키)
+    #   저장 이미지에는 들어가지 않음
+    # ──────────────────────────────────────────────
+    REF_TITLE_H = 26
+    REF_SIZES = [260, 380, 540]
+
+    def _ref_image(self, fname):
+        """그림을 돌려줌. 처음엔 백그라운드로 불러오고 None(불러오는 중), 실패하면 False"""
+        if fname not in self._ref_images:
+            self._ref_images[fname] = None
+            threading.Thread(target=self._load_ref_image, args=(fname,), daemon=True).start()
+        return self._ref_images[fname]
+
+    def _load_ref_image(self, fname):
+        """파이썬으로 실행(개발용)하면 프로젝트의 references 폴더, exe면 GitHub에서 받아
+        실행 파일 옆 references 폴더에 저장. 인터넷이 안 되면 저장해 둔 그림 사용"""
+        local = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'references', fname)
+        img = None
+        if getattr(sys, 'frozen', False) or not os.path.exists(local):
+            try:
+                import ssl
+                import urllib.request
+                import urllib.parse
+                ctx = ssl.create_default_context()   # 런처와 같이 일부 PC 호환을 위해 인증서 검사 생략
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(REFERENCE_URL + urllib.parse.quote(fname),
+                                             headers={"Cache-Control": "no-cache", "User-Agent": "VisionInspector"})
+                with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                    data = resp.read()
+                img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    try:
+                        os.makedirs(os.path.dirname(local), exist_ok=True)
+                        with open(local, 'wb') as f:
+                            f.write(data)
+                    except OSError:
+                        pass
+            except Exception:
+                img = None
+        if img is None and os.path.exists(local):
+            img = cv2.imdecode(np.fromfile(local, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self._ref_images[fname] = img if img is not None else False
+
+    def _ref_layout(self):
+        """측정 기준 창의 (x, y, 폭, 높이, 그림, 그림 높이)"""
+        _, fname = REFERENCES[self.ref_idx]
+        img, ih = None, 0
+        w = 300
+        if self.ref_open:
+            img = self._ref_image(fname)
+            w = self.ref_width
+            if isinstance(img, np.ndarray):
+                ih = int(img.shape[0] * w / img.shape[1])
+                max_h = self.cam_display_h - self.REF_TITLE_H - 20
+                if ih > max_h:   # 화면보다 길면 높이에 맞춰 줄임
+                    w, ih = int(w * max_h / ih), max_h
+            else:
+                ih = 50
+            w = max(w, 300)   # 제목줄 버튼이 들어갈 최소 폭
+        h = self.REF_TITLE_H + ih
+        top, bottom = self.cam_y_offset, self.cam_y_offset + self.cam_display_h
+        if self.ref_pos is None:   # 처음: 영상 왼쪽 아래
+            x, y = 10, bottom - h - 10
+        else:
+            x, y = self.ref_pos
+        x = int(min(max(x, 0), self.view_w - w))
+        y = int(min(max(y, top), bottom - h))
+        return x, y, w, h, img, ih
+
+    def _draw_ref_panel_img(self, display_img):
+        """측정 기준 창의 바탕과 그림 (PIL 글자보다 먼저)"""
+        self._ref_rect = None
+        if not REFERENCES:
+            return
+        x, y, w, h, img, ih = self._ref_layout()
+        self._ref_rect = (x, y, x + w, y + h)
+        cv2.rectangle(display_img, (x, y), (x + w, y + h), (25, 25, 25), -1)
+        cv2.rectangle(display_img, (x, y), (x + w, y + self.REF_TITLE_H), (55, 55, 55), -1)
+        if isinstance(img, np.ndarray) and ih > 0:
+            iw = int(img.shape[1] * ih / img.shape[0])
+            key = (REFERENCES[self.ref_idx][1], iw, ih)
+            if getattr(self, '_ref_resized_key', None) != key:
+                self._ref_resized = cv2.resize(img, (iw, ih), interpolation=cv2.INTER_AREA)
+                self._ref_resized_key = key
+            ix = x + (w - iw) // 2
+            display_img[y + self.REF_TITLE_H:y + self.REF_TITLE_H + ih, ix:ix + iw] = self._ref_resized
+        cv2.rectangle(display_img, (x, y), (x + w, y + h), (0, 122, 204), 1)
+
+    def _draw_ref_panel_text(self, draw):
+        """측정 기준 창의 제목·버튼 글자와 클릭 영역"""
+        self._ref_hits = []
+        if self._ref_rect is None:
+            return
+        x, y, x2, y2 = self._ref_rect
+        font = self._font("malgun.ttf", 11)
+        font_b = self._font("malgunbd.ttf", 11)
+        txt = (241, 241, 241)
+        th = self.REF_TITLE_H
+        # 오른쪽 버튼: [접기/펴기] [+] [−]
+        bx = x2 - 4
+        buttons = [('toggle', '접기' if self.ref_open else '펴기  (R)', 64 if not self.ref_open else 40)]
+        if self.ref_open:
+            buttons += [('bigger', '+', 22), ('smaller', '-', 22), ('name', '바꾸기', 46)]
+        for what, label, bw in buttons:
+            box = (bx - bw, y + 3, bx, y + th - 3)
+            draw.rectangle(box, fill=(204, 122, 0) if what == 'toggle' else (80, 80, 80))
+            tb = draw.textbbox((0, 0), label, font=font)
+            draw.text(((box[0] + box[2] - (tb[2] - tb[0])) / 2 - tb[0], y + 5), label, font=font, fill=txt)
+            self._ref_hits.append((*box, what))
+            bx -= bw + 4
+        # 제목 (제목줄은 끌어서 창 이동, 제품 바꾸기는 '바꾸기' 버튼)
+        name = REFERENCES[self.ref_idx][0]
+        title = f"{'▼' if self.ref_open else '▶'} {name if self.ref_open else '측정 기준: ' + name}"
+        while len(title) > 4 and draw.textbbox((x + 8, y + 5), title, font=font_b)[2] > bx - 4:
+            title = title[:-2] + '…'   # 버튼과 겹치지 않게 줄임
+        draw.text((x + 8, y + 5), title, font=font_b, fill=txt)
+        if self.ref_open:
+            img = self._ref_images.get(REFERENCES[self.ref_idx][1])
+            if img is None:
+                draw.text((x + 10, y + th + 16), "그림을 불러오는 중...", font=font, fill=(180, 180, 180))
+            elif img is False:
+                draw.text((x + 10, y + th + 10), "그림을 받을 수 없습니다.\n인터넷 연결을 확인하세요.",
+                          font=font, fill=(80, 80, 255))
+
+    def _ref_mouse(self, event, x, y, flags):
+        """측정 기준 창 위의 마우스 조작. 처리했으면 True (아래 측정 화면으로 전달 안 함)"""
+        if self.ref_dragging is not None:
+            if event == cv2.EVENT_MOUSEMOVE:
+                self.ref_pos = [x - self.ref_dragging[0], y - self.ref_dragging[1]]
+                return True
+            if event == cv2.EVENT_LBUTTONUP:
+                self.ref_dragging = None
+                return True
+        if self._ref_rect is None:
+            return False
+        x1, y1, x2, y2 = self._ref_rect
+        if not (x1 <= x <= x2 and y1 <= y <= y2):
+            return False
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for hx1, hy1, hx2, hy2, what in self._ref_hits:
+                if hx1 <= x <= hx2 and hy1 <= y <= hy2:
+                    if what == 'toggle':
+                        self.ref_open = not self.ref_open
+                    elif what == 'bigger':
+                        self.ref_width = next((s for s in self.REF_SIZES if s > self.ref_width), self.ref_width)
+                    elif what == 'smaller':
+                        self.ref_width = next((s for s in reversed(self.REF_SIZES) if s < self.ref_width),
+                                              self.ref_width)
+                    elif what == 'name':
+                        self._pick("측정 기준 선택", [n for n, _ in REFERENCES],
+                                   lambda i: (setattr(self, 'ref_idx', i), setattr(self, 'ref_open', True)),
+                                   sel=self.ref_idx)
+                    return True
+            # 제목줄·그림 아무 곳이나 끌면 창 이동
+            self.ref_dragging = (x - x1, y - y1)
+            return True
+        # 창 위의 클릭·휠은 아래 측정 화면으로 넘기지 않음 (버튼 떼기는 다른 조작이 끝날 수 있게 넘김)
+        return event in (cv2.EVENT_LBUTTONDBLCLK, cv2.EVENT_MOUSEWHEEL,
+                         cv2.EVENT_RBUTTONDOWN, cv2.EVENT_RBUTTONDBLCLK)
+
     def _dialog_root(self):
         """파일 선택 창용 Tk 창: 프로그램 창 가운데·맨 앞에 두어 파일 창이 같은 모니터, 맨 앞에 뜨게 함"""
         root = tk.Tk()
@@ -1872,6 +2059,8 @@ class VisionInspector:
             self._modal_mouse(event, x, y, flags)
             return
         self.curr_mx, self.curr_my = x, y
+        if self._ref_mouse(event, x, y, flags):   # 측정 기준 창 위의 조작
+            return
 
         self.hovered_button = None
         if x > self.view_w:
@@ -2374,6 +2563,8 @@ class VisionInspector:
                 self._reset_view()
             elif key in (ord('e'), ord('E')):
                 self.edge_snap = not self.edge_snap
+            elif key in (ord('r'), ord('R')):
+                self.ref_open = not self.ref_open
 
         self.cap.release()
         cv2.destroyAllWindows()
