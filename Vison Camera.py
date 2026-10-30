@@ -2405,9 +2405,10 @@ class VisionInspector:
                 root = self._dialog_root()
                 path = filedialog.asksaveasfilename(
                     title="검사 결과 이미지 저장",
-                    defaultextension=".jpg",
-                    filetypes=[("JPG 이미지", "*.jpg"), ("PNG 이미지 (화질 손실 없음)", "*.png")],
-                    initialfile=f'검사결과_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg',
+                    # 기본은 PNG (압축으로 경계가 뭉개지지 않음), 용량을 줄이려면 JPG 선택
+                    defaultextension=".png",
+                    filetypes=[("PNG 이미지 (화질 손실 없음)", "*.png"), ("JPG 이미지 (용량 작음)", "*.jpg")],
+                    initialfile=f'검사결과_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png',
                     # 도면을 연 폴더가 아니라 마지막으로 이미지를 저장한 폴더에서 열기
                     initialdir=getattr(self, 'last_save_dir', None),
                     parent=root
@@ -2415,7 +2416,7 @@ class VisionInspector:
                 root.destroy()
                 if path:
                     if os.path.splitext(path)[1].lower() not in ('.jpg', '.jpeg', '.png'):
-                        path += '.jpg'
+                        path += '.png'
                     ext = os.path.splitext(path)[1].lower()
                     try:
                         params = [] if ext == '.png' else [int(cv2.IMWRITE_JPEG_QUALITY), 95]
